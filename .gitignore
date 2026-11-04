@@ -1,0 +1,11 @@
+.env
+data/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+*.db
+*.db-wal
+*.db-shm
+*.db.lock
+.DS_Store
