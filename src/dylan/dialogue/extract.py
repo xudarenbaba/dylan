@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from dylan.dialogue.rules import extract_rules
+from dylan.dialogue.rules import extract_rules, model_summary_allowed
 from dylan.dialogue.secrets import has_secret
 from dylan.memory.constants import EXCLUDED_SYNAPSE_TYPES, MEMORY_TYPES, NEURON_KINDS, SYNAPSE_TYPES
 from dylan.memory.encode import Draft
@@ -64,7 +64,7 @@ def plan_turn(
         parsed = _Payload()
     for item in parsed.items:
         draft = _from_model(item, user_text)
-        if draft is not None:
+        if draft is not None and model_summary_allowed(draft.summary):
             drafts.append(draft)
     kept: list[Draft] = []
     for draft in drafts:

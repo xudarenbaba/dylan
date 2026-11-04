@@ -7,7 +7,13 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 
 from dylan.clock import days_between, dump_time, load_time
-from dylan.memory.anchors import overlaps, query_dates, select_anchors, time_window
+from dylan.memory.anchors import (
+    name_question_anchors,
+    overlaps,
+    query_dates,
+    select_anchors,
+    time_window,
+)
 from dylan.memory.compress import promote_tier
 from dylan.memory.constants import (
     ANCHOR_CAP,
@@ -181,7 +187,9 @@ def _compute(
         if fiber.memory_type == "workflow"
         for neuron_id in fiber.neuron_ids
     }
-    anchors = select_anchors(list(neurons.values()), query, workflow_ids)
+    anchors = dict(select_anchors(list(neurons.values()), query, workflow_ids))
+    for neuron_id, initial in name_question_anchors(neurons, fibers, query):
+        anchors[neuron_id] = max(anchors.get(neuron_id, 0.0), initial)
     activation: dict[str, float] = {}
     contributors: dict[str, set[str]] = defaultdict(set)
     parents: dict[tuple[str, str], tuple[str, str]] = {}
@@ -193,7 +201,7 @@ def _compute(
         if synapse.direction == "bi":
             outgoing[synapse.target_id].append((synapse, synapse.source_id))
 
-    for anchor_id, initial in anchors:
+    for anchor_id, initial in anchors.items():
         local = {anchor_id: initial}
         queue: deque[tuple[str, int]] = deque([(anchor_id, 0)])
         while queue:

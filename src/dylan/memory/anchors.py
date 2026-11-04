@@ -23,6 +23,41 @@ def anchor_cap(neuron: Neuron, workflow_ids: set[str]) -> float:
     return ANCHOR_CAP["concept"]
 
 
+_USER_NAME_QUESTIONS = ("我叫什么", "我是谁")
+_NAME_FACT = re.compile(r"我(?:叫|是)([\u4e00-\u9fffA-Za-z0-9]{1,16})")
+
+
+def name_question_anchors(
+    neurons: dict[str, Neuron],
+    fibers: list[Fiber],
+    query: str,
+) -> list[tuple[str, float]]:
+    """A name question does not contain the stored name, so depth 0 cannot walk to it."""
+    if not any(phrase in query for phrase in _USER_NAME_QUESTIONS):
+        return []
+    chosen: list[tuple[str, float]] = []
+    seen: set[str] = set()
+    for fiber in fibers:
+        if fiber.state != "active" or fiber.memory_type != "fact":
+            continue
+        if fiber.provenance.source != "user_input":
+            continue
+        text = f"{fiber.summary} {fiber.body or ''}"
+        for match in _NAME_FACT.finditer(text):
+            name = match.group(1)
+            if name in {"谁", "什么"} or name.startswith(("什么", "谁", "哪", "怎")):
+                continue
+            for neuron_id in fiber.neuron_ids:
+                neuron = neurons.get(neuron_id)
+                if neuron is None or neuron.state != "active" or neuron.kind != "entity":
+                    continue
+                if neuron.content != name or neuron.id in seen:
+                    continue
+                seen.add(neuron.id)
+                chosen.append((neuron.id, ANCHOR_CAP["entity"]))
+    return chosen
+
+
 def select_anchors(
     neurons: list[Neuron],
     query: str,
