@@ -21,6 +21,8 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "dylan.memory" = ["schema.sql"]
+"dylan.dialogue" = ["guides/*.txt"]
+"dylan.viz" = ["page.html"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

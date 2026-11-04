@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dylan 记忆</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f4f1ea;
+    --ink: #1c1915;
+    --line: #d9d2c5;
+    --card: #fffdf8;
+    --muted: #6d655b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 15px/1.5 "Iowan Old Style", Palatino, "Songti SC", serif;
+    color: var(--ink);
+    background: var(--bg);
+  }
+  header {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--line);
+  }
+  h1 { font-size: 18px; font-weight: 600; margin: 0; }
+  header p { margin: 0; color: var(--muted); font-size: 13px; }
+  nav { margin-left: auto; display: flex; gap: 6px; }
+  button {
+    font: inherit;
+    border: 1px solid var(--line);
+    background: var(--card);
+    padding: 4px 10px;
+    cursor: pointer;
+  }
+  button.on { background: var(--ink); color: var(--card); }
+  main { display: grid; grid-template-columns: 1fr 320px; min-height: calc(100vh - 58px); }
+  #stage { position: relative; min-height: 480px; }
+  canvas { width: 100%; height: 100%; display: block; }
+  aside {
+    border-left: 1px solid var(--line);
+    background: var(--card);
+    padding: 14px;
+    overflow: auto;
+  }
+  #list { display: none; padding: 14px 18px; }
+  .panel { display: none; padding: 14px 18px; }
+  pre { white-space: pre-wrap; background: var(--card); border: 1px solid var(--line); padding: 10px; }
+  .card { border: 1px solid var(--line); background: var(--card); padding: 10px 12px; margin: 0 0 8px; cursor: pointer; }
+  .card.on { outline: 2px solid var(--ink); }
+  .meta { color: var(--muted); font-size: 13px; }
+  dl { margin: 0; }
+  dt { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  dd { margin: 0; }
+  table { border-collapse: collapse; background: var(--card); }
+  td, th { border: 1px solid var(--line); padding: 6px 10px; text-align: left; }
+  @media (max-width: 800px) {
+    main { grid-template-columns: 1fr; }
+    aside { border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>dylan 记忆</h1>
+    <p>只读。VS Code 可用 Simple Browser 打开这个地址。页面不能改记忆。</p>
+  </div>
+  <nav>
+    <button id="tab-graph" class="on" type="button">图</button>
+    <button id="tab-memories" type="button">记忆</button>
+    <button id="tab-journal" type="button">日志</button>
+    <button id="tab-mind" type="button">她</button>
+  </nav>
+</header>
+<main id="graph-view">
+  <div id="stage"><canvas id="canvas"></canvas></div>
+  <aside id="detail"><p class="meta">点一个节点或一条连线。天生的记忆和关系标为「天生」，不会衰减。</p></aside>
+</main>
+<section id="memories" class="panel"></section>
+<section id="journal" class="panel"></section>
+<section id="mind" class="panel"></section>
+<script>
+const KIND = {
+  memory: "#8a5a3d",
+  person: "#2f6f4e",
+  animal: "#5a7a2f",
+  place: "#3d6a80",
+  organization: "#4f4f80",
+  object: "#7a6a3d",
+  work: "#80503d",
+  topic: "#3d5a80",
+  time: "#6a5a8a",
+  emotion: "#8a3d55"
+};
+const state = { nodes: [], links: [], memories: [], journal: [], mind: {}, byId: {}, byAnchor: {}, highlight: null };
+const TABS = ["graph", "memories", "journal", "mind"];
+
+function show(name) {
+  document.getElementById("graph-view").style.display = name === "graph" ? "grid" : "none";
+  for (const id of ["memories", "journal", "mind"]) {
+    document.getElementById(id).style.display = name === id ? "block" : "none";
+  }
+  for (const id of TABS) {
+    document.getElementById("tab-" + id).classList.toggle("on", id === name);
+  }
+  if (name === "graph") resize();
+}
+
+for (const id of TABS) {
+  document.getElementById("tab-" + id).onclick = () => show(id);
+}
+
+function esc(value) {
+  return String(value === null || value === undefined || value === "" ? "—" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function field(label, value) {
+  return "<dt>" + esc(label) + "</dt><dd>" + esc(value) + "</dd>";
+}
+
+function renderDetail(html) {
+  document.getElementById("detail").innerHTML = html;
+}
+
+function memoryFields(memory) {
+  return field("类型", memory.type) +
+    field("一句话", memory.statement) +
+    field("几个字", memory.gist) +
+    field("原话", memory.detail || memory.evidence) +
+    field("来源", memory.source) +
+    field("记得多清楚", memory.clarity) +
+    field("强度", memory.strength) +
+    field("阶段", memory.stage) +
+    field("细节层级", memory.detail_level) +
+    field("状态", memory.state) +
+    field("重要程度", memory.importance) +
+    field("情绪", memory.emotion ? memory.emotion.who + " " + memory.emotion.label + " " + memory.emotion.intensity : "") +
+    field("把握", memory.confidence) +
+    field("发生", memory.occurred_start) +
+    field("定在", memory.due_at) +
+    field("触发", memory.trigger) +
+    field("线索词", (memory.cues || []).join("、")) +
+    field("想起次数", memory.recall_count) +
+    field("记下", memory.created_at);
+}
+
+function pickNode(node) {
+  const memory = state.byAnchor[node.id];
+  if (memory) {
+    renderDetail("<dl>" + memoryFields(memory) + "</dl>");
+    return;
+  }
+  const inside = state.memories.filter((item) => item.neuron_ids.indexOf(node.id) >= 0)
+    .map((item) => item.statement || item.gist).join("；");
+  renderDetail("<dl>" +
+    field("名字", node.name) +
+    field("种类", node.kind_label) +
+    field("别名", (node.aliases || []).join("、")) +
+    field("天生", node.innate ? "是" : "否") +
+    field("所在记忆", inside) +
+    "</dl>");
+}
+
+function pickEdge(edge) {
+  const left = state.byId[edge.source_id];
+  const right = state.byId[edge.target_id];
+  renderDetail("<dl>" +
+    field("关系", edge.type_label + (edge.label ? "（" + edge.label + "）" : "")) +
+    field("从", left ? left.name : edge.source_id) +
+    field("到", right ? right.name : edge.target_id) +
+    field("重量", edge.weight) +
+    field("来历", edge.innate ? "天生，不衰减" : (edge.grown ? "常一起被想起，随时间变弱" : "她记下的")) +
+    "</dl>");
+}
+
+function renderMemories() {
+  const root = document.getElementById("memories");
+  root.innerHTML = "";
+  for (const memory of state.memories) {
+    const card = document.createElement("article");
+    card.className = "card";
+    card.innerHTML = "<strong>" + esc(memory.statement || memory.gist) + "</strong>" +
+      "<div class='meta'>" + esc(memory.type) + " · " + esc(memory.clarity) +
+      " · 强度 " + esc(memory.strength) + " · " + esc(memory.stage) +
+      " · " + esc(memory.state) + " · " + esc(memory.source) + "</div>";
+    card.onclick = () => {
+      state.highlight = { neurons: memory.neuron_ids.slice(), synapses: memory.synapse_ids.slice() };
+      show("graph");
+      renderDetail("<dl>" + memoryFields(memory) + "</dl>");
+    };
+    root.appendChild(card);
+  }
+}
+
+function renderJournal() {
+  const rows = state.journal.map((row) => "<tr><td>" + esc(row.at) + "</td><td>" + esc(row.phase) +
+    "</td><td>" + esc(row.op) + "</td><td>" + esc(row.status) + "</td><td>" + esc(row.label) +
+    "</td><td>" + esc(row.reason) + "</td></tr>").join("");
+  document.getElementById("journal").innerHTML =
+    "<table><tr><th>时间</th><th>时机</th><th>动作</th><th>结果</th><th>内容</th><th>说明</th></tr>" + rows + "</table>";
+}
+
+function renderMind() {
+  const mind = state.mind;
+  const mood = mind.mood ? mind.mood.label + "（" + mind.mood.cause + "）" : "平稳";
+  const counts = mind.counts || {};
+  document.getElementById("mind").innerHTML = "<dl>" +
+    field("心情底色", mind.baseline_mood) +
+    field("最近的心情", mood) +
+    field("记忆", counts.fibers) +
+    field("神经元", counts.neurons) +
+    field("突触", counts.synapses) +
+    field("会话", counts.sessions) +
+    "</dl><h3>出生时读到的身份信</h3><pre>" + esc(mind.identity_text) + "</pre>";
+}
+
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+
+function resize() {
+  const stage = document.getElementById("stage");
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = stage.clientWidth * ratio;
+  canvas.height = stage.clientHeight * ratio;
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+}
+
+function layout() {
+  const width = document.getElementById("stage").clientWidth || 640;
+  const height = document.getElementById("stage").clientHeight || 480;
+  const count = state.nodes.length || 1;
+  state.nodes.forEach((node, index) => {
+    const angle = (Math.PI * 2 * index) / count;
+    node.x = width / 2 + Math.cos(angle) * Math.min(width, height) * 0.28;
+    node.y = height / 2 + Math.sin(angle) * Math.min(width, height) * 0.28;
+    node.vx = 0;
+    node.vy = 0;
+  });
+}
+
+function step() {
+  const width = document.getElementById("stage").clientWidth || 640;
+  const height = document.getElementById("stage").clientHeight || 480;
+  const nodes = state.nodes;
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      let dx = nodes[j].x - nodes[i].x;
+      let dy = nodes[j].y - nodes[i].y;
+      let dist = Math.hypot(dx, dy) || 0.1;
+      const force = 800 / (dist * dist);
+      dx /= dist; dy /= dist;
+      nodes[i].vx -= dx * force; nodes[i].vy -= dy * force;
+      nodes[j].vx += dx * force; nodes[j].vy += dy * force;
+    }
+  }
+  for (const edge of state.links) {
+    const left = state.byId[edge.source_id];
+    const right = state.byId[edge.target_id];
+    if (!left || !right) continue;
+    const dx = right.x - left.x;
+    const dy = right.y - left.y;
+    left.vx += dx * 0.01; left.vy += dy * 0.01;
+    right.vx -= dx * 0.01; right.vy -= dy * 0.01;
+  }
+  for (const node of nodes) {
+    node.vx += (width / 2 - node.x) * 0.01;
+    node.vy += (height / 2 - node.y) * 0.01;
+    node.vx *= 0.6; node.vy *= 0.6;
+    node.x = Math.max(24, Math.min(width - 24, node.x + node.vx));
+    node.y = Math.max(24, Math.min(height - 24, node.y + node.vy));
+  }
+}
+
+function highlighted(id, key) {
+  return state.highlight && state.highlight[key].indexOf(id) >= 0;
+}
+
+function draw() {
+  const width = document.getElementById("stage").clientWidth || 640;
+  const height = document.getElementById("stage").clientHeight || 480;
+  ctx.clearRect(0, 0, width, height);
+  ctx.font = "12px sans-serif";
+  for (const edge of state.links) {
+    const left = state.byId[edge.source_id];
+    const right = state.byId[edge.target_id];
+    if (!left || !right) continue;
+    const hot = state.highlight && highlighted(edge.id, "synapses");
+    ctx.strokeStyle = hot ? "#1c1915" : (edge.grown ? "#d8cfc0" : "#b7ad9e");
+    ctx.lineWidth = hot ? 2.4 : 1;
+    ctx.beginPath();
+    ctx.moveTo(left.x, left.y);
+    ctx.lineTo(right.x, right.y);
+    ctx.stroke();
+    const label = edge.type_label + (edge.innate ? " · 天生" : "");
+    ctx.fillStyle = "#6d655b";
+    ctx.fillText(label, (left.x + right.x) / 2, (left.y + right.y) / 2);
+  }
+  for (const node of state.nodes) {
+    const hot = state.highlight && highlighted(node.id, "neurons");
+    ctx.beginPath();
+    ctx.fillStyle = KIND[node.kind] || "#444";
+    ctx.arc(node.x, node.y, hot ? 11 : (node.kind === "memory" ? 6 : 8), 0, Math.PI * 2);
+    ctx.fill();
+    if (node.innate) {
+      ctx.strokeStyle = "#1c1915";
+      ctx.stroke();
+    }
+    ctx.fillStyle = "#1c1915";
+    const text = String(node.name || "");
+    ctx.fillText(text.length > 16 ? text.slice(0, 16) + "…" : text, node.x + 12, node.y + 4);
+  }
+  requestAnimationFrame(() => { step(); draw(); });
+}
+
+function pointer(event) {
+  const rect = canvas.getBoundingClientRect();
+  return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+}
+
+canvas.onclick = (event) => {
+  const point = pointer(event);
+  let nearest = null;
+  let best = 18;
+  for (const node of state.nodes) {
+    const dist = Math.hypot(node.x - point.x, node.y - point.y);
+    if (dist < best) { best = dist; nearest = node; }
+  }
+  if (nearest) { pickNode(nearest); return; }
+  let edgeHit = null;
+  let edgeBest = 8;
+  for (const edge of state.links) {
+    const left = state.byId[edge.source_id];
+    const right = state.byId[edge.target_id];
+    if (!left || !right) continue;
+    const dist = distanceToSegment(point, left, right);
+    if (dist < edgeBest) { edgeBest = dist; edgeHit = edge; }
+  }
+  if (edgeHit) pickEdge(edgeHit);
+};
+
+function distanceToSegment(point, left, right) {
+  const dx = right.x - left.x;
+  const dy = right.y - left.y;
+  const length = dx * dx + dy * dy || 1;
+  let t = ((point.x - left.x) * dx + (point.y - left.y) * dy) / length;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(point.x - (left.x + t * dx), point.y - (left.y + t * dy));
+}
+
+async function load() {
+  const graph = await (await fetch("/api/graph")).json();
+  state.links = graph.links;
+  state.memories = graph.memories;
+  state.journal = graph.journal;
+  state.mind = graph.mind;
+  state.nodes = graph.nodes.map((node) => Object.assign({ x: 0, y: 0, vx: 0, vy: 0 }, node));
+  state.byId = {};
+  for (const node of state.nodes) state.byId[node.id] = node;
+  state.byAnchor = {};
+  for (const memory of state.memories) state.byAnchor[memory.anchor_id] = memory;
+  renderMemories();
+  renderJournal();
+  renderMind();
+  resize();
+  layout();
+  draw();
+}
+
+window.addEventListener("resize", resize);
+load();
+</script>
+</body>
+</html>

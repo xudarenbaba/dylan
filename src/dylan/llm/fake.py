@@ -1,19 +1,36 @@
-"""Test double. It answers from the thought record and does not invent memories."""
+"""Test double. Replies echo what came to mind; JSON answers come from scripted queues."""
 
 from __future__ import annotations
 
-import json
+import re
 from collections.abc import Iterator
+
+_RECALLED = "此刻想起的事：\n"
+_NOTHING = "（没有想起什么特别的）"
+_SENTENCE = re.compile(r"[^。！？\n]+")
+
+
+def request_kind(messages: list[dict[str, str]]) -> str:
+    system = messages[0].get("content", "") if messages else ""
+    if system.startswith("〔出生〕"):
+        return "birth"
+    if system.startswith("〔睡眠整理〕"):
+        return "sleep"
+    return "note"
 
 
 class FakeModel:
-    def __init__(self) -> None:
+    def __init__(self, user_name: str = "赵旭") -> None:
+        self.user_name = user_name
         self.seen: list[list[dict[str, str]]] = []
-        self.json_seen: list[list[dict[str, str]]] = []
-        self.json_items: list[dict[str, object]] = []
+        self.json_seen: list[tuple[str, list[dict[str, str]]]] = []
+        self.births: list[object] = []
+        self.notes: list[object] = []
+        self.sleeps: list[object] = []
         self.fail: Exception | None = None
         self.partial: str | None = None
         self.json_fail = False
+        self.reply: str | None = None
 
     def stream_reply(self, messages: list[dict[str, str]]) -> Iterator[str]:
         self.seen.append(messages)
@@ -21,54 +38,77 @@ class FakeModel:
             yield self.partial
         if self.fail is not None:
             raise self.fail
-        yield render_reply(messages)
+        yield self.reply if self.reply is not None else render_reply(messages)
 
     def complete_json(self, messages: list[dict[str, str]]) -> dict[str, object]:
-        self.json_seen.append(messages)
+        kind = request_kind(messages)
+        self.json_seen.append((kind, messages))
         if self.json_fail:
             raise RuntimeError("json")
-        return {"items": list(self.json_items)}
+        queue = {"birth": self.births, "note": self.notes, "sleep": self.sleeps}[kind]
+        if queue:
+            item = queue.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item  # type: ignore[return-value]
+        if kind == "birth":
+            return self.default_birth(messages[-1].get("content", ""))
+        if kind == "sleep":
+            return {
+                "ops": [
+                    {
+                        "op": "add",
+                        "type": "session",
+                        "about": "我们",
+                        "statement": "我们聊了一会儿天",
+                        "source": "shared",
+                    }
+                ],
+                "summary": "聊了一会儿天",
+                "mood": None,
+            }
+        return {"ops": [], "used": [], "mood": None, "summary": ""}
+
+    def default_birth(self, letter: str) -> dict[str, object]:
+        ops: list[dict[str, object]] = []
+        for match in _SENTENCE.finditer(letter):
+            sentence = match.group(0).strip("，, ")
+            if len(sentence) < 4 or sentence.endswith(("：", ":")):
+                continue
+            ops.append(
+                {
+                    "op": "add",
+                    "about": "dylan",
+                    "statement": sentence,
+                    "evidence": sentence,
+                    "importance": 8,
+                }
+            )
+            if len(ops) >= 40:
+                break
+        return {
+            "user_name": self.user_name,
+            "self_name": "dylan",
+            "baseline_mood": "开朗",
+            "ops": ops,
+        }
+
+    def calls(self, kind: str) -> list[list[dict[str, str]]]:
+        return [messages for seen, messages in self.json_seen if seen == kind]
+
+
+def recalled_block(messages: list[dict[str, str]]) -> str:
+    for message in messages:
+        content = message.get("content") or ""
+        if _RECALLED not in content:
+            continue
+        block = content.split(_RECALLED, 1)[1].split("\n\n", 1)[0]
+        return "" if block.strip() == _NOTHING else block.strip()
+    return ""
 
 
 def render_reply(messages: list[dict[str, str]]) -> str:
-    thought = _read_thought(messages)
-    conflicts = thought.get("conflicts") or []
-    if conflicts:
-        parts = []
-        for item in conflicts:
-            parts.append(str(item.get("left", "")))
-            parts.append(str(item.get("right", "")))
-        return "两边都出现过：" + "；".join(part for part in parts if part)
-    recalled = thought.get("recalled") or []
-    if thought.get("certainty") == "none" or not recalled:
+    block = recalled_block(messages)
+    if not block:
         return "没有印象"
-    lines: list[str] = []
-    for item in recalled:
-        summary = str(item.get("summary", ""))
-        attitude = item.get("certainty")
-        if attitude == "inferred":
-            lines.append(f"我推断{summary}")
-        elif attitude == "faint":
-            lines.append(f"我有一点印象：{summary}")
-        else:
-            lines.append(summary)
-    return "。".join(lines)
-
-
-def _read_thought(messages: list[dict[str, str]]) -> dict[str, object]:
-    for message in messages:
-        content = message.get("content") or ""
-        marker = "思考记录："
-        if marker not in content:
-            continue
-        raw = content.split(marker, 1)[1]
-        start = raw.find("{")
-        if start < 0:
-            continue
-        try:
-            payload, _end = json.JSONDecoder().raw_decode(raw[start:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            return payload
-    return {"certainty": "none", "recalled": [], "conflicts": []}
+    return "；".join(line.strip() for line in block.splitlines() if line.strip())

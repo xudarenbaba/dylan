@@ -49,3 +49,7 @@ class MissingStore(DylanError):
 
 class LockedBrain(DylanError):
     category = "已有一个 dylan 在使用这块大脑"
+
+
+class BirthFailed(DylanError):
+    category = "出生失败"

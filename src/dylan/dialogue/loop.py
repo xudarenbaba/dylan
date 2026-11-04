@@ -1,83 +1,202 @@
-"""One turn, then a clean exit. Ctrl-C leaves before the session episode."""
+"""One brain, one conversation. She hears, remembers, replies, notes the moment, and sleeps."""
 
 from __future__ import annotations
 
-from dylan.clock import Clock, dump_time
+import threading
+from collections.abc import Callable
+from concurrent.futures import Future
+from dataclasses import dataclass, field
+from datetime import tzinfo
+
+from dylan.clock import Clock, zone
 from dylan.config import Settings
-from dylan.dialogue.buffer import Buffer
-from dylan.dialogue.depth import choose_depth
-from dylan.dialogue.extract import plan_turn
-from dylan.dialogue.prompt import build_messages, hot_entries, pack_hot, pack_recall
-from dylan.dialogue.rules import extract_rules
-from dylan.dialogue.secrets import has_secret
-from dylan.dialogue.thought import Thought, build_thought
-from dylan.errors import DylanError
-from dylan.memory.compress import visible_text
-from dylan.memory.consolidate.habits import strengthen_online
-from dylan.memory.consolidate.runner import short_consolidation
-from dylan.memory.constants import HOT_TYPES, PRIVACY_NOTICE
-from dylan.memory.encode import forget_fragment, write_drafts, write_episode
-from dylan.memory.lifecycle import expire_due
+from dylan.dialogue.prompt import (
+    birth_messages,
+    candidate_lines,
+    note_messages,
+    reply_messages,
+    sleep_messages,
+)
+from dylan.errors import BirthFailed, DylanError
+from dylan.memory.awareness import build_awareness
+from dylan.memory.constants import (
+    MAX_CANDIDATES,
+    PRIVACY_NOTICE,
+    SESSION_CANDIDATES,
+    USED_BUMP,
+)
+from dylan.memory.life import (
+    Handles,
+    birth,
+    discard_empty,
+    finish_sleep,
+    give_up,
+    reset_innate,
+    sessions_to_sleep,
+    sleep_material,
+)
+from dylan.memory.maintain import maintain
+from dylan.memory.model import Fiber, Mood
+from dylan.memory.ops import Context, Outcome, Writer, _float
+from dylan.memory.physiology import clarity
 from dylan.memory.recall import Recall, persist_recall, recall
-from dylan.memory.store import MemoryStore, day_key
+from dylan.memory.render import describe, fit
+from dylan.memory.store import MemoryStore
+from dylan.memory.text import clip, mask_secrets
+
+MASKED_NOTICE = "这句话里像密钥的部分没有记住"
+NOTE_FAILED = "上一轮没有记下来，睡觉时会再整理"
+SLEEP_FAILED = "这次的睡眠整理没有完成，下次启动时会再整理"
+SLEEP_GAVE_UP = "睡眠整理多次失败，这次会话只保留了已经记下的部分"
 
 
-class Session:
+def in_background(call: Callable[[], object]) -> Future:
+    """One model request off the main thread. Daemon, so Ctrl-C never waits for it."""
+    future: Future = Future()
+
+    def run() -> None:
+        try:
+            future.set_result(call())
+        except BaseException as exc:
+            future.set_exception(exc)
+
+    threading.Thread(target=run, daemon=True).start()
+    return future
+
+
+def _masked(text: object, limit: int, api_key: str) -> str:
+    return mask_secrets(clip(text, limit), api_key)[0]
+
+
+def be_born(store: MemoryStore, letter: str, model: object, settings: Settings) -> Outcome:
+    tz = zone(settings.dylan_timezone)
+    try:
+        proposal = model.complete_json(birth_messages(letter))  # type: ignore[attr-defined]
+        return birth(store, letter, proposal, tz, settings.deepseek_api_key)
+    except DylanError as exc:
+        raise BirthFailed(exc.category) from exc
+    except Exception as exc:
+        raise BirthFailed(str(exc) or "身份信没有读懂") from exc
+
+
+def be_reborn(store: MemoryStore, letter: str, model: object, settings: Settings) -> Outcome:
+    tz = zone(settings.dylan_timezone)
+    try:
+        proposal = model.complete_json(birth_messages(letter))  # type: ignore[attr-defined]
+        return reset_innate(store, letter, proposal, tz, settings.deepseek_api_key)
+    except DylanError as exc:
+        raise BirthFailed(exc.category) from exc
+    except Exception as exc:
+        raise BirthFailed(str(exc) or "身份信没有读懂") from exc
+
+
+def sleep_pending(store: MemoryStore, model: object, settings: Settings, stderr: object) -> int:
+    """Finish every conversation that has not been slept on yet. Returns how many."""
+    tz = zone(settings.dylan_timezone)
+    done = 0
+    for session in sessions_to_sleep(store):
+        if discard_empty(store, session):
+            continue
+        _catch_up_notes(store, session.id, model, settings, stderr)
+        handles = Handles()
+        listed, transcript = sleep_material(store, session, handles)
+        now = store.clock.now()
+        clarity_of = {fiber.id: clarity(fiber) for _handle, fiber in listed}
+        candidates = candidate_lines(listed, clarity_of, tz, now)
+        messages = sleep_messages(
+            who=_names(store),
+            now=now,
+            tz=tz,
+            transcript=transcript,
+            summary=session.summary,
+            candidates=candidates,
+        )
+        try:
+            proposal = model.complete_json(messages)  # type: ignore[attr-defined]
+            if not isinstance(proposal, dict):
+                raise ValueError("sleep")
+        except Exception:
+            if not give_up(store, session.id):
+                stderr.write(SLEEP_FAILED + "\n")  # type: ignore[attr-defined]
+                continue
+            stderr.write(SLEEP_GAVE_UP + "\n")  # type: ignore[attr-defined]
+            proposal = None
+        outcome = finish_sleep(store, session, proposal, handles, tz, settings.deepseek_api_key)
+        _show(outcome, settings, stderr, "睡眠")
+        done += 1
+    if not done:
+        maintain(store)
+    return done
+
+
+@dataclass
+class Pending:
+    future: Future
+    turn_id: str
+    user_text: str
+    reply_text: str
+    handles: dict[str, str]
+    summary_before: str
+    recent: list[tuple[str, str]] = field(default_factory=list)
+
+
+class Conversation:
     def __init__(
         self,
         store: MemoryStore,
         settings: Settings,
         model: object,
         clock: Clock,
-        identity_text: str,
-        compressor: object | None = None,
     ) -> None:
         self.store = store
         self.settings = settings
         self.model = model
         self.clock = clock
-        self.identity_text = identity_text
-        self.compressor = compressor
-        self.buffer = Buffer(settings.dylan_buffer_turns)
-        self.seen_orders: set[str] = set()
-        self.touched: set[str] = set()
-        self.turns_done = False
-        self.pending = ""
-        self.last_thought: Thought | None = None
+        self.tz: tzinfo = zone(settings.dylan_timezone)
+        self.letter = store.meta()["identity_text"]
+        self.session = None
+        self.turns: list[tuple[str, str]] = []
+        self.summary = ""
+        self.carry: list[str] = []
+        self.pending: Pending | None = None
+        self.warning = ""
 
     def turn(self, text: str, stdout: object, stderr: object) -> None:
-        if self.pending:
-            stderr.write(self.pending + "\n")  # type: ignore[attr-defined]
-            self.pending = ""
-        with self.store.transaction():
-            expire_due(self.store)
-        depth, hops, window = choose_depth(text)
-        result = recall(
+        self._settle_note(stderr)
+        if self.warning:
+            stderr.write(self.warning + "\n")  # type: ignore[attr-defined]
+            self.warning = ""
+        if self.session is None:
+            with self.store.transaction():
+                self.session = self.store.start_session()
+        masked, hidden = mask_secrets(text, self.settings.deepseek_api_key)
+        if hidden:
+            stderr.write(MASKED_NOTICE + "\n")  # type: ignore[attr-defined]
+        awareness = build_awareness(
             self.store,
-            text,
-            depth=depth,
-            max_hops=hops,
-            window_days=window,
-            limits=self.settings.limits(),
-            persist=False,
+            self.tz,
+            current_session=self.session.id,
+            budget=self.settings.dylan_awareness_chars,
         )
-        preview, _forgets = extract_rules(text)
-        novel = [
-            draft.summary
-            for draft in preview
-            if not has_secret(draft.summary, self.settings.deepseek_api_key)
-        ]
-        now = dump_time(self.clock.now())
-        thought = build_thought(result, novel, now_text=now)
-        self.last_thought = thought
-        if self.settings.dylan_show_thought:
-            stderr.write(thought.model_dump_json() + "\n")  # type: ignore[attr-defined]
-        messages = build_messages(
-            identity_text=self.identity_text,
-            hot_text=pack_hot(hot_entries(self.store.fibers()), self.settings.dylan_hot_chars),
-            thought=thought,
-            recall_text=_recall_text(result, self.clock, self.settings.dylan_recall_chars),
-            buffer=self.buffer,
+        context = [masked, *[said for said, _ in reversed(self.turns[-2:])]]
+        found = recall(
+            self.store,
+            context,
+            self.tz,
+            carry=self.carry,
+            exclude=set(awareness.fiber_ids),
+            limit=self.settings.dylan_recall_limit,
+        )
+        now = self.clock.now()
+        lines = [describe(hit.fiber, hit.clarity, self.tz, now) for hit in found.hits]
+        recalled = "\n".join(fit(lines, self.settings.dylan_recall_chars))
+        if self.settings.dylan_show_mind:
+            stderr.write(f"〔常驻〕\n{awareness.text}\n〔想起〕\n{recalled or '无'}\n")  # type: ignore[attr-defined]
+        messages = reply_messages(
+            letter=self.letter,
+            awareness=awareness.text,
+            recalled=recalled,
+            turns=self.turns[-self.settings.dylan_buffer_turns :],
             user_text=text,
         )
         chunks: list[str] = []
@@ -91,108 +210,212 @@ class Session:
             if chunks and not str(chunks[-1]).endswith("\n"):
                 stdout.write("\n")  # type: ignore[attr-defined]
             return
-        answer = "".join(chunks)
-        if not answer.endswith("\n"):
+        reply = "".join(chunks)
+        if not reply.endswith("\n"):
             stdout.write("\n")  # type: ignore[attr-defined]
-        try:
-            self._commit(text, answer, result, stderr)
-        except Exception:
-            self.pending = "上一轮没有记住"
-            stderr.write("上一轮没有记住\n")  # type: ignore[attr-defined]
-
-    def _commit(self, user: str, answer: str, result: Recall, stderr: object) -> None:
-        drafts, forgets, warnings = plan_turn(
-            user, answer, self.model, self.settings.deepseek_api_key
-        )
-        for warning in warnings:
-            stderr.write(warning + "\n")  # type: ignore[attr-defined]
-        spilled = self.buffer.spill()
+        reply_masked, _ = mask_secrets(reply, self.settings.deepseek_api_key)
         with self.store.transaction():
-            persist_recall(self.store, result)
-            if spilled is not None:
-                pair = _pair_text(*spilled)
-                if not has_secret(pair, self.settings.deepseek_api_key):
-                    write_episode(self.store, pair, [], auto_session=False)
-            for fragment in forgets:
-                for message in forget_fragment(self.store, fragment):
-                    stderr.write(message + "\n")  # type: ignore[attr-defined]
-            written = write_drafts(self.store, drafts, self.settings.limits())
-            self._note_habits(written)
-            for hit in result.hits:
-                self.touched.update(hit.fiber.neuron_ids)
-            for fiber in written:
-                self.touched.update(fiber.neuron_ids)
-        self.buffer.commit(user, answer)
-        self.turns_done = True
+            persist_recall(self.store, found, self.tz)
+            turn = self.store.add_turn(self.session.id, masked, reply_masked)
+        self._start_note(turn.id, masked, reply_masked, found, awareness.fiber_ids)
+        self.turns.append((masked, reply_masked))
+        self.carry = [hit.fiber.id for hit in found.hits][:3]
 
-    def _note_habits(self, written: list) -> None:
-        day = day_key(dump_time(self.clock.now()))
-        for fiber in written:
-            ids: list[str] = []
-            for neuron_id in fiber.neuron_ids:
-                neuron = self.store.neuron(neuron_id)
-                if neuron is not None and neuron.kind in {"concept", "entity"}:
-                    ids.append(neuron.id)
-            if len(ids) < 2:
+    def finish(self, stderr: object) -> None:
+        self._settle_note(stderr)
+        if self.session is None:
+            return
+        sleep_pending(self.store, self.model, self.settings, stderr)
+
+    def abandon(self) -> None:
+        self.pending = None
+
+    # noting the moment
+
+    def _start_note(
+        self,
+        turn_id: str,
+        user_text: str,
+        reply_text: str,
+        found: Recall,
+        aware_ids: list[str],
+    ) -> None:
+        handles = Handles()
+        listed: list[tuple[str, Fiber]] = []
+        clarity_of: dict[str, str] = {}
+        for hit in found.hits:
+            listed.append((handles.add(hit.fiber), hit.fiber))
+            clarity_of[hit.fiber.id] = hit.clarity
+        for fiber_id in [*aware_ids, *self._session_fibers()]:
+            fiber = self.store.fiber(fiber_id)
+            if fiber is None or fiber.id in clarity_of or len(listed) >= MAX_CANDIDATES:
                 continue
-            signature = ">".join(ids)
-            self.store.observe_sequence(signature, day)
-            if signature in self.seen_orders:
-                strengthen_online(self.store, ids)
-            self.seen_orders.add(signature)
-
-    def finish(self) -> None:
-        if self.turns_done:
-            pairs = []
-            for user, answer in self.buffer.turns:
-                pair = _pair_text(user, answer)
-                if has_secret(pair, self.settings.deepseek_api_key):
-                    continue
-                pairs.append(pair)
-            if pairs:
-                with self.store.transaction():
-                    write_episode(
-                        self.store,
-                        "\n".join(pairs),
-                        list(self.touched),
-                        auto_session=True,
-                    )
-        short_consolidation(
-            self.store,
-            auto_dream=self.settings.dylan_auto_dream,
-            compressor=self.compressor,  # type: ignore[arg-type]
-            limits=self.settings.limits(),
+            listed.append((handles.add(fiber), fiber))
+            clarity_of[fiber.id] = clarity(fiber)
+        now = self.clock.now()
+        recent = list(self.turns[-2:])
+        messages = note_messages(
+            who=_names(self.store),
+            now=now,
+            tz=self.tz,
+            recent=recent,
+            user_text=user_text,
+            reply_text=reply_text,
+            candidates=candidate_lines(listed, clarity_of, self.tz, now),
+            summary=self.summary,
+        )
+        future = in_background(lambda: self.model.complete_json(messages))  # type: ignore[attr-defined]
+        self.pending = Pending(
+            future=future,
+            turn_id=turn_id,
+            user_text=user_text,
+            reply_text=reply_text,
+            handles=dict(handles.by_handle),
+            summary_before=self.summary,
+            recent=recent,
         )
 
+    def _settle_note(self, stderr: object) -> None:
+        pending = self.pending
+        if pending is None:
+            return
+        self.pending = None
+        try:
+            proposal = pending.future.result()
+            if not isinstance(proposal, dict):
+                raise ValueError("note")
+        except Exception:
+            with self.store.transaction():
+                self.store.bump_attempts(pending.turn_id)
+            self.warning = NOTE_FAILED
+            return
+        try:
+            session_id = self.session.id
+            outcome = apply_note(self.store, self.settings, self.tz, pending, proposal, session_id)
+        except Exception:
+            self.warning = NOTE_FAILED
+            return
+        summary = _masked(proposal.get("summary"), 300, self.settings.deepseek_api_key)
+        if summary:
+            self.summary = summary
+        _show(outcome, self.settings, stderr, "记下")
 
-def run_chat(session: Session, stdin: object, stdout: object, stderr: object) -> None:
-    if not session.store.privacy_shown():
+    def _session_fibers(self) -> list[str]:
+        if self.session is None:
+            return []
+        ids = self.store.touched_since(self.session.started_at)
+        return ids[:SESSION_CANDIDATES]
+
+
+def apply_note(
+    store: MemoryStore,
+    settings: Settings,
+    tz: tzinfo,
+    pending: Pending,
+    proposal: dict,
+    session_id: str,
+) -> Outcome:
+    ctx = Context(
+        phase="note",
+        tz=tz,
+        api_key=settings.deepseek_api_key,
+        user_text=pending.user_text,
+        reply_text=pending.reply_text,
+        handles=pending.handles,
+        session_id=session_id,
+    )
+    api_key = settings.deepseek_api_key
+    with store.transaction():
+        writer = Writer(store, ctx)
+        outcome = writer.apply(proposal.get("ops"))
+        writer.strengthen_handles(proposal.get("used"), USED_BUMP, count=True)
+        mood = proposal.get("mood")
+        if isinstance(mood, dict) and _masked(mood.get("label"), 10, api_key):
+            store.set_mood(
+                Mood(
+                    label=_masked(mood.get("label"), 10, api_key),
+                    intensity=_float(mood.get("intensity"), 0.5, 0.0, 1.0),
+                    cause=_masked(mood.get("cause"), 40, api_key),
+                    at=store.now(),
+                )
+            )
+        summary = _masked(proposal.get("summary"), 300, api_key)
+        if summary:
+            store.set_session_summary(session_id, summary)
+        store.mark_noted(pending.turn_id)
+    return outcome
+
+
+def _catch_up_notes(
+    store: MemoryStore, session_id: str, model: object, settings: Settings, stderr: object
+) -> None:
+    """Turns that were never noted get one more try before sleep reviews them."""
+    tz = zone(settings.dylan_timezone)
+    turns = [turn for turn in store.pending_turns() if turn.session_id == session_id]
+    session = store.session(session_id)
+    summary = session.summary if session else ""
+    for turn in turns:
+        now = store.clock.now()
+        messages = note_messages(
+            who=_names(store),
+            now=now,
+            tz=tz,
+            recent=[],
+            user_text=turn.user_text,
+            reply_text=turn.reply_text,
+            candidates="（没有）",
+            summary=summary,
+        )
+        pending = Pending(
+            future=Future(),
+            turn_id=turn.id,
+            user_text=turn.user_text,
+            reply_text=turn.reply_text,
+            handles={},
+            summary_before=summary,
+        )
+        try:
+            proposal = model.complete_json(messages)  # type: ignore[attr-defined]
+            if not isinstance(proposal, dict):
+                raise ValueError("note")
+            outcome = apply_note(store, settings, tz, pending, proposal, session_id)
+            _show(outcome, settings, stderr, "补记")
+        except Exception:
+            with store.transaction():
+                store.bump_attempts(turn.id)
+
+
+def _names(store: MemoryStore) -> tuple[str, str]:
+    meta = store.meta()
+    user = store.neuron(meta["user_id"])
+    me = store.neuron(meta["self_id"])
+    return (user.name if user else "他", me.name if me else "dylan")
+
+
+def _show(outcome: Outcome, settings: Settings, stderr: object, title: str) -> None:
+    if not settings.dylan_show_mind or not outcome.lines:
+        return
+    stderr.write(f"〔{title}〕\n" + "\n".join(outcome.lines) + "\n")  # type: ignore[attr-defined]
+
+
+def run_chat(conversation: Conversation, stdin: object, stdout: object, stderr: object) -> None:
+    store = conversation.store
+    if not store.privacy_shown():
         stdout.write(PRIVACY_NOTICE + "\n")  # type: ignore[attr-defined]
         stdout.flush()  # type: ignore[attr-defined]
-        session.store.mark_privacy_shown()
-    while True:
-        line = stdin.readline()  # type: ignore[attr-defined]
-        if line == "":
-            session.finish()
-            return
-        stripped = line.strip()
-        if stripped == "":
-            continue
-        if stripped in {"exit", "quit"}:
-            session.finish()
-            return
-        session.turn(stripped, stdout, stderr)
-
-
-def _recall_text(result: Recall, clock: Clock, budget: int) -> str:
-    now = clock.now()
-    items = [
-        (hit.score, visible_text(hit.fiber, now))
-        for hit in result.hits
-        if hit.fiber.memory_type not in HOT_TYPES
-    ]
-    return pack_recall(items, budget)
-
-
-def _pair_text(user: str, answer: str) -> str:
-    return f"用户：{user}\ndylan：{answer}"
+        store.mark_privacy_shown()
+    try:
+        while True:
+            line = stdin.readline()  # type: ignore[attr-defined]
+            if line == "":
+                break
+            stripped = line.strip()
+            if stripped == "":
+                continue
+            if stripped in {"exit", "quit"}:
+                break
+            conversation.turn(stripped, stdout, stderr)
+    except BaseException:
+        conversation.abandon()
+        raise
+    conversation.finish(stderr)
