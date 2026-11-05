@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>dylan</title>
+<style>
+  :root { color-scheme: light; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 15px/1.55 "PingFang SC", "Hiragino Sans GB", sans-serif;
+    background: #f4f0e8;
+    color: #1c1915;
+    display: flex;
+    flex-direction: column;
+  }
+  #log {
+    flex: 1;
+    overflow: auto;
+    padding: 16px 14px 8px;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+  .meta {
+    margin: 10px 18px;
+    color: #6d6458;
+    font-size: 12px;
+    line-height: 1.45;
+    text-align: center;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+  .row { display: flex; margin: 8px 0; user-select: text; -webkit-user-select: text; }
+  .row.user { justify-content: flex-end; }
+  .bubble {
+    max-width: 86%;
+    white-space: pre-wrap;
+    word-break: break-word;
+    user-select: text;
+    -webkit-user-select: text;
+    padding: 8px 10px;
+    border-radius: 12px;
+  }
+  .who {
+    display: block;
+    margin-bottom: 2px;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    color: #8a8175;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .row.user .who { text-align: right; color: #d9d0c4; }
+  .row.user .bubble { background: #1c1915; color: #f4f0e8; }
+  .row.dylan .bubble { background: #fffdf8; color: #1c1915; border: 1px solid #e4dccf; }
+  form {
+    display: flex;
+    gap: 8px;
+    padding: 10px;
+    border-top: 1px solid #e4dccf;
+    background: #fffdf8;
+  }
+  textarea {
+    flex: 1;
+    resize: none;
+    min-height: 44px;
+    max-height: 120px;
+    border: 1px solid #e4dccf;
+    border-radius: 8px;
+    padding: 8px;
+    font: inherit;
+    background: transparent;
+    color: inherit;
+  }
+  button {
+    border: 0;
+    background: #1c1915;
+    color: #f4f0e8;
+    border-radius: 8px;
+    padding: 0 14px;
+    font: inherit;
+  }
+  button:disabled, textarea:disabled { opacity: 0.45; }
+</style>
+</head>
+<body>
+<div id="log"></div>
+<form id="composer">
+  <textarea id="box" rows="2" placeholder="跟她说一句"></textarea>
+  <button type="submit" id="send">发送</button>
+</form>
+<script>
+(function () {
+  var log = document.getElementById("log");
+  var box = document.getElementById("box");
+  var sendBtn = document.getElementById("send");
+  var streaming = null;
+  var leaving = false;
+  var busy = false;
+  var pending = [];
+
+  function scroll() {
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function meta(text) {
+    var p = document.createElement("p");
+    p.className = "meta";
+    p.textContent = text;
+    log.appendChild(p);
+    scroll();
+  }
+
+  function bubble(who) {
+    var row = document.createElement("div");
+    row.className = "row " + who;
+    var label = document.createElement("span");
+    label.className = "who";
+    label.textContent = who === "user" ? "我" : "她";
+    var div = document.createElement("div");
+    div.className = "bubble";
+    div.appendChild(label);
+    var body = document.createElement("span");
+    body.className = "body";
+    div.appendChild(body);
+    row.appendChild(div);
+    log.appendChild(row);
+    scroll();
+    return body;
+  }
+
+  function lock() {
+    leaving = true;
+    busy = false;
+    pending = [];
+    streaming = null;
+    box.disabled = true;
+    sendBtn.disabled = true;
+  }
+
+  function pump() {
+    if (busy || leaving || !pending.length || !window.pywebview) return;
+    busy = true;
+    var text = pending.shift();
+    bubble("user").textContent = text;
+    window.pywebview.api.send(text);
+  }
+
+  function apply(ev) {
+    if (!ev || !ev.kind) return;
+    if (ev.kind === "privacy" || ev.kind === "notice" || ev.kind === "status") {
+      meta(ev.text || "");
+      if (ev.kind === "status") lock();
+      return;
+    }
+    if (ev.kind === "chunk") {
+      if (!streaming) streaming = bubble("dylan");
+      streaming.textContent += ev.text || "";
+      scroll();
+      return;
+    }
+    if (ev.kind === "end") {
+      streaming = null;
+      busy = false;
+      if (!leaving) {
+        sendBtn.disabled = false;
+        pump();
+        if (!busy) box.focus();
+      }
+      return;
+    }
+    if (ev.kind === "closed") lock();
+  }
+
+  function poll() {
+    if (!window.pywebview || !window.pywebview.api) return Promise.resolve();
+    return window.pywebview.api.poll().then(function (events) {
+      if (!events) return;
+      for (var i = 0; i < events.length; i++) apply(events[i]);
+    });
+  }
+
+  function loop() {
+    poll().then(function () {
+      window.setTimeout(loop, 50);
+    }, function () {
+      window.setTimeout(loop, 50);
+    });
+  }
+
+  function submit() {
+    if (leaving) return;
+    var text = box.value.replace(/^\s+|\s+$/g, "");
+    if (!text) return;
+    box.value = "";
+    pending.push(text);
+    pump();
+  }
+
+  window.addEventListener("pywebviewready", function () {
+    loop();
+    pump();
+    box.focus();
+  });
+
+  window.addEventListener("dragover", function (event) { event.preventDefault(); });
+  window.addEventListener("drop", function (event) { event.preventDefault(); });
+
+  box.addEventListener("keydown", function (event) {
+    if (event.isComposing || event.keyCode === 229) return;
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      submit();
+    }
+  });
+
+  document.getElementById("composer").addEventListener("submit", function (event) {
+    event.preventDefault();
+    submit();
+  });
+})();
+</script>
+</body>
+</html>

@@ -11,6 +11,7 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.4",
     "python-dotenv>=1.0",
+    "pywebview>=5.1",
 ]
 
 [project.scripts]
@@ -23,6 +24,7 @@ where = ["src"]
 "dylan.memory" = ["schema.sql"]
 "dylan.dialogue" = ["guides/*.txt"]
 "dylan.viz" = ["page.html"]
+"dylan.desk" = ["page.html"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

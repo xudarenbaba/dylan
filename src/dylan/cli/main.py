@@ -22,7 +22,7 @@ LETTER_CHANGED = (
     "身份信和她出生时读到的不一样了。她仍按出生时的那封信生活；"
     "确实要改她的天性，退出后执行 dylan reset-identity --yes"
 )
-_NEEDS_KEY = frozenset({"chat", "sleep", "reset-identity"})
+_NEEDS_KEY = frozenset({"chat", "desk", "sleep", "reset-identity"})
 
 
 def main(
@@ -63,7 +63,7 @@ def main(
         stderr.write(f"{MissingKey('DEEPSEEK_API_KEY')}\n")
         return 1
     db_path = Path(settings.dylan_db)
-    if command != "chat" and not db_path.exists():
+    if command not in {"chat", "desk"} and not db_path.exists():
         stderr.write(f"{MissingStore(str(db_path))}\n")
         return 1
     if command == "memory":
@@ -80,7 +80,7 @@ def main(
     store: MemoryStore | None = None
     try:
         lock.acquire()
-        if command in {"chat", "reset-identity"}:
+        if command in {"chat", "desk", "reset-identity"}:
             letter = _letter(letter_file)
         else:
             letter = ""
@@ -98,6 +98,13 @@ def main(
             except KeyboardInterrupt:
                 return 130
             return 0
+        if command == "desk":
+            from dylan.desk.window import run_desk
+
+            try:
+                return run_desk(db_path, clock, letter, model, settings, stderr)
+            except KeyboardInterrupt:
+                return 130
         store = MemoryStore.open(db_path, clock)
         if not store.born():
             raise StoreCorrupt("这块大脑还没有出生，请删除后重新启动对话")
@@ -156,6 +163,7 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="dylan")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("chat")
+    sub.add_parser("desk")
     sub.add_parser("status")
     sub.add_parser("sleep")
     sub.add_parser("maintain")

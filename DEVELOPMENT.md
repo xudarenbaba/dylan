@@ -3,9 +3,9 @@
 | 项 | 内容 |
 | --- | --- |
 | 文档编号 | DYLAN-DEV-001 |
-| 版本 | 0.4 |
-| 状态 | 与需求规格 0.5、技术设计 0.4 对齐 |
-| 日期 | 2026-11-04 |
+| 版本 | 0.5 |
+| 状态 | 与需求规格 0.6、技术设计 0.5 对齐 |
+| 日期 | 2026-11-05 |
 | 上位文档 | [REQUIREMENTS.md](REQUIREMENTS.md)、[TECHNICAL.md](TECHNICAL.md) |
 
 ## 1. 环境
@@ -30,6 +30,7 @@ src/dylan/dialogue/        对话循环、四种请求、guides/ 下的四份指
 src/dylan/llm/             DeepSeek 客户端、测试替身
 src/dylan/memory/          记忆的结构、生理、写入、想起、常驻意识、出生与睡眠
 src/dylan/viz/             只读记忆页
+src/dylan/desk/            本机对话窗口。测试不打开真实窗口
 tests/                     测试；support/ 下是时钟和假传输层
 data/                      运行后才有，被忽略
 ```
@@ -38,10 +39,10 @@ data/                      运行后才有，被忽略
 
 - 阈值、清单和参数只写在 `memory/constants.py`。
 - `memory` 不导入 `openai`、`dialogue`、`cli`；`dialogue` 不导入 `sqlite3`；`llm` 不打开记忆库。由 `test_no_forbidden_deps.py` 和 `test_model_port.py` 检查。
-- 写库只在主线程，一次逻辑写入一个事务。
+- 写库只在持有这条连接的线程，一次逻辑写入一个事务。命令行是主线程。桌面窗口是名为 `dylan-desk` 的工作线程，界面线程只排队。
 - 时间存 UTC，形如 `2026-11-03T12:00:00Z`；给她看的时间按 `DYLAN_TIMEZONE`。
 - 给模型的指引改 `dialogue/guides/*.txt`，不在代码里拼长字符串。
-- 标准输出只有隐私说明和她的回答；警告和 `DYLAN_SHOW_MIND` 的内容写到标准错误。
+- 命令行的标准输出只有隐私说明和她的回答；警告和 `DYLAN_SHOW_MIND` 的内容写到标准错误。桌面窗口把隐私说明和回答放进窗口，`DYLAN_SHOW_MIND` 仍只出现在启动它的终端。
 
 ## 4. 测试
 
@@ -89,7 +90,9 @@ DYLAN_DB=data/trial.db DYLAN_SHOW_MIND=true dylan
 | 一起想象 | 「要是我们一起去看海就好了」 | 不记成发生过的事 |
 | 间隔 | 拨开几天再聊 | 她知道过了几天，记得上次聊了什么 |
 
-`dylan memory` 打开只读页，可以在「日志」里看到每次提议是被采纳、调整还是拒绝，以及原因。
+`dylan memory` 打开只读页，可以在「日志」里看到每次提议是被采纳、调整还是拒绝，以及原因。同一套话也可以在 `dylan desk` 里说，关掉窗口相当于 `exit`。
+
+测试不要启动真实窗口。`tests/test_desk.py` 只驱动工作线程。缺密钥和锁被占用这两条走命令入口，确认窗口模块没有被导入。
 
 ## 7. 修订
 
@@ -99,3 +102,4 @@ DYLAN_DB=data/trial.db DYLAN_SHOW_MIND=true dylan
 | 0.2 | 2026-11-03 | 对齐需求 0.3 |
 | 0.3 | 2026-11-04 | 身份图与只读页 |
 | 0.4 | 2026-11-04 | 对齐需求 0.5 与技术设计 0.4：新模块、剧本式假模型、真实模型检查场景 |
+| 0.5 | 2026-11-05 | 本机对话窗口：依赖 pywebview，工作线程持有数据库，测试不打开真实窗口 |
