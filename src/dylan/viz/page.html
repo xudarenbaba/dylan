@@ -28,26 +28,43 @@
     border-bottom: 1px solid var(--line);
   }
   h1 { font-size: 18px; font-weight: 600; margin: 0; }
+  h2 { font-size: 14px; font-weight: 600; margin: 10px 0 4px; }
   header p { margin: 0; color: var(--muted); font-size: 13px; }
   nav { margin-left: auto; display: flex; gap: 6px; }
-  button {
+  button, input {
     font: inherit;
     border: 1px solid var(--line);
     background: var(--card);
     padding: 4px 10px;
-    cursor: pointer;
   }
+  button { cursor: pointer; }
   button.on { background: var(--ink); color: var(--card); }
   main { display: grid; grid-template-columns: 1fr 320px; min-height: calc(100vh - 58px); }
-  #stage { position: relative; min-height: 480px; }
-  canvas { width: 100%; height: 100%; display: block; }
+  #stage { position: relative; min-height: 480px; overflow: hidden; }
+  canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+  #toolbar, #legend {
+    position: absolute;
+    z-index: 2;
+    background: var(--card);
+    border: 1px solid var(--line);
+  }
+  #toolbar { top: 10px; right: 10px; display: flex; gap: 6px; padding: 6px; align-items: center; }
+  #search { width: 148px; }
+  #legend {
+    top: 10px;
+    left: 10px;
+    width: 232px;
+    max-height: calc(100% - 20px);
+    overflow: auto;
+    padding: 8px 10px;
+  }
+  #legend h2:first-child { margin-top: 0; }
   aside {
     border-left: 1px solid var(--line);
     background: var(--card);
     padding: 14px;
     overflow: auto;
   }
-  #list { display: none; padding: 14px 18px; }
   .panel { display: none; padding: 14px 18px; }
   pre { white-space: pre-wrap; background: var(--card); border: 1px solid var(--line); padding: 10px; }
   .card { border: 1px solid var(--line); background: var(--card); padding: 10px 12px; margin: 0 0 8px; cursor: pointer; }
@@ -58,9 +75,14 @@
   dd { margin: 0; }
   table { border-collapse: collapse; background: var(--card); }
   td, th { border: 1px solid var(--line); padding: 6px 10px; text-align: left; }
+  .legend-row, .chip { display: flex; align-items: center; gap: 6px; font-size: 13px; margin: 2px 0; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 12px; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  #focus-toggle { margin: 0 0 10px; }
   @media (max-width: 800px) {
     main { grid-template-columns: 1fr; }
     aside { border-left: 0; border-top: 1px solid var(--line); }
+    #toolbar { flex-wrap: wrap; max-width: calc(100% - 250px); }
   }
 </style>
 </head>
@@ -78,8 +100,21 @@
   </nav>
 </header>
 <main id="graph-view">
-  <div id="stage"><canvas id="canvas"></canvas></div>
-  <aside id="detail"><p class="meta">点一个节点或一条连线。天生的记忆和关系标为「天生」，不会衰减。</p></aside>
+  <div id="stage">
+    <div id="legend"><h2>图例</h2><div id="legend-body"></div></div>
+    <div id="toolbar">
+      <input id="search" type="search" placeholder="搜索名字或记忆" aria-label="搜索">
+      <button id="zoom-in" type="button">放大</button>
+      <button id="zoom-out" type="button">缩小</button>
+      <button id="zoom-fit" type="button">看全图</button>
+    </div>
+    <canvas id="canvas"></canvas>
+  </div>
+  <aside id="detail">
+    <p id="hint" class="meta">点一个节点或一条连线。天生的记忆和关系标为「天生」，不会衰减。</p>
+    <button id="focus-toggle" type="button" hidden>只留相连</button>
+    <div id="detail-body"></div>
+  </aside>
 </main>
 <section id="memories" class="panel"></section>
 <section id="journal" class="panel"></section>
@@ -97,7 +132,70 @@ const KIND = {
   time: "#6a5a8a",
   emotion: "#8a3d55"
 };
-const state = { nodes: [], links: [], memories: [], journal: [], mind: {}, byId: {}, byAnchor: {}, highlight: null };
+const KIND_ORDER = Object.keys(KIND);
+const TYPE_LABEL = {
+  innate: "天生",
+  self: "自我认识",
+  event: "事件",
+  session: "相处",
+  period: "时期",
+  fact: "事实",
+  status: "近况",
+  preference: "喜好",
+  habit: "习惯",
+  agreement: "约定",
+  plan: "打算",
+  impression: "印象"
+};
+const TYPE_ORDER = Object.keys(TYPE_LABEL);
+const TYPE_COLOR = {
+  innate: "#8a5a3d",
+  self: "#6b3a5a",
+  event: "#3d5a80",
+  session: "#3d6a80",
+  period: "#5a6a3d",
+  fact: "#2f6f4e",
+  status: "#7a5a2f",
+  preference: "#8a3d55",
+  habit: "#4f4f80",
+  agreement: "#80503d",
+  plan: "#5a7a2f",
+  impression: "#6a5a8a"
+};
+const GROUP_ORDER = ["element", "social", "possession", "attitude", "sequence", "revision", "grown"];
+const GROUP_COLOR = {
+  element: "#8a5a3d",
+  social: "#2f6f4e",
+  possession: "#3d6a80",
+  attitude: "#8a3d55",
+  sequence: "#4f4f80",
+  revision: "#7a5a2f",
+  grown: "#6d655b"
+};
+const HINT = "点一个节点或一条连线。天生的记忆和关系标为「天生」，不会衰减。";
+const state = {
+  nodes: [],
+  links: [],
+  memories: [],
+  journal: [],
+  mind: {},
+  byId: {},
+  byAnchor: {},
+  showType: {},
+  showKind: {},
+  showGroup: {},
+  selected: null,
+  focusOnly: false,
+  query: "",
+  camera: { x: 40, y: 40, k: 1 },
+  ratio: 1,
+  view: { nodes: new Set(), edges: new Set() },
+  sim: false,
+  calm: 0,
+  fitWhenCalm: false,
+  frame: 0,
+  drag: null
+};
 const TABS = ["graph", "memories", "journal", "mind"];
 
 function show(name) {
@@ -120,15 +218,12 @@ function esc(value) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function field(label, value) {
   return "<dt>" + esc(label) + "</dt><dd>" + esc(value) + "</dd>";
-}
-
-function renderDetail(html) {
-  document.getElementById("detail").innerHTML = html;
 }
 
 function memoryFields(memory) {
@@ -153,52 +248,217 @@ function memoryFields(memory) {
     field("记下", memory.created_at);
 }
 
+function showHint() {
+  const hint = document.getElementById("hint");
+  hint.hidden = false;
+  hint.textContent = HINT;
+  document.getElementById("detail-body").innerHTML = "";
+}
+
+function showDetail(html) {
+  document.getElementById("hint").hidden = true;
+  document.getElementById("detail-body").innerHTML = "<dl>" + html + "</dl>";
+}
+
+function setFocusButton() {
+  const button = document.getElementById("focus-toggle");
+  button.hidden = !state.selected;
+  button.classList.toggle("on", state.focusOnly);
+}
+
 function pickNode(node) {
   const memory = state.byAnchor[node.id];
   if (memory) {
-    renderDetail("<dl>" + memoryFields(memory) + "</dl>");
+    showDetail(memoryFields(memory));
     return;
   }
   const inside = state.memories.filter((item) => item.neuron_ids.indexOf(node.id) >= 0)
     .map((item) => item.statement || item.gist).join("；");
-  renderDetail("<dl>" +
+  showDetail(
     field("名字", node.name) +
     field("种类", node.kind_label) +
     field("别名", (node.aliases || []).join("、")) +
     field("天生", node.innate ? "是" : "否") +
-    field("所在记忆", inside) +
-    "</dl>");
+    field("所在记忆", inside)
+  );
 }
 
 function pickEdge(edge) {
   const left = state.byId[edge.source_id];
   const right = state.byId[edge.target_id];
-  renderDetail("<dl>" +
+  showDetail(
     field("关系", edge.type_label + (edge.label ? "（" + edge.label + "）" : "")) +
     field("从", left ? left.name : edge.source_id) +
     field("到", right ? right.name : edge.target_id) +
+    field("组", edge.group_label) +
     field("重量", edge.weight) +
-    field("来历", edge.innate ? "天生，不衰减" : (edge.grown ? "常一起被想起，随时间变弱" : "她记下的")) +
-    "</dl>");
+    field("来历", edge.innate ? "天生，不衰减" : (edge.grown ? "常一起被想起，随时间变弱" : "她记下的"))
+  );
+}
+
+function kindVisible(node) {
+  if (state.showKind[node.kind] === false) return false;
+  if (node.kind === "memory" && state.showType[node.memory_type] === false) return false;
+  return true;
+}
+
+function linkBaseVisible(edge) {
+  if (state.showGroup[edge.group] === false) return false;
+  const left = state.byId[edge.source_id];
+  const right = state.byId[edge.target_id];
+  return Boolean(left && right && kindVisible(left) && kindVisible(right));
+}
+
+function rebuildView() {
+  const nodes = new Set();
+  const edges = new Set();
+  if (state.selected && state.byId[state.selected] && kindVisible(state.byId[state.selected])) {
+    nodes.add(state.selected);
+    for (const edge of state.links) {
+      if (!linkBaseVisible(edge)) continue;
+      if (edge.source_id !== state.selected && edge.target_id !== state.selected) continue;
+      edges.add(edge.id);
+      nodes.add(edge.source_id);
+      nodes.add(edge.target_id);
+    }
+  }
+  state.view = { nodes, edges };
+}
+
+function nodeShown(node) {
+  if (!kindVisible(node)) return false;
+  if (!state.focusOnly || !state.selected) return true;
+  return state.view.nodes.has(node.id);
+}
+
+function linkShown(edge) {
+  if (!linkBaseVisible(edge)) return false;
+  if (!state.focusOnly || !state.selected) return true;
+  return state.view.edges.has(edge.id);
+}
+
+function memoryListed(memory) {
+  const node = state.byId[memory.anchor_id];
+  if (!node || !node.memory_type) return true;
+  return state.showType[node.memory_type] !== false;
+}
+
+function orderedKeys(order, seen) {
+  const keys = order.filter((key) => seen.has(key));
+  for (const key of seen) {
+    if (!keys.includes(key)) keys.push(key);
+  }
+  return keys;
+}
+
+function row(color, label, visible, total, mapName, key, on) {
+  return "<label class='legend-row'>" +
+    "<input type='checkbox' data-map='" + mapName + "' data-key='" + esc(key) + "'" +
+    (on ? " checked" : "") + ">" +
+    "<i class='swatch' style='background:" + color + "'></i>" +
+    "<span>" + esc(label) + "</span>" +
+    "<span class='meta'>" + visible + " / " + total + "</span></label>";
+}
+
+function renderLegend() {
+  rebuildView();
+  const typeSeen = new Set();
+  const kindSeen = new Set();
+  const groupSeen = new Map();
+  for (const node of state.nodes) {
+    kindSeen.add(node.kind);
+    if (node.kind === "memory" && node.memory_type) typeSeen.add(node.memory_type);
+  }
+  for (const edge of state.links) {
+    if (!groupSeen.has(edge.group)) groupSeen.set(edge.group, edge.group_label || edge.group);
+  }
+  const parts = [];
+  const typeKeys = orderedKeys(TYPE_ORDER, typeSeen);
+  if (typeKeys.length) {
+    parts.push("<h2>记忆类型</h2>");
+    for (const key of typeKeys) {
+      const all = state.nodes.filter((node) => node.kind === "memory" && node.memory_type === key);
+      const visible = all.filter(nodeShown).length;
+      parts.push(row(
+        TYPE_COLOR[key] || "#444",
+        TYPE_LABEL[key] || key,
+        visible,
+        all.length,
+        "showType",
+        key,
+        state.showType[key] !== false
+      ));
+    }
+  }
+  const kindKeys = orderedKeys(KIND_ORDER, kindSeen);
+  if (kindKeys.length) {
+    parts.push("<h2>神经元种类</h2>");
+    for (const key of kindKeys) {
+      const all = state.nodes.filter((node) => node.kind === key);
+      const label = (all.find((node) => node.kind_label) || {}).kind_label || key;
+      parts.push(row(
+        KIND[key] || "#444",
+        label,
+        all.filter(nodeShown).length,
+        all.length,
+        "showKind",
+        key,
+        state.showKind[key] !== false
+      ));
+    }
+  }
+  const groupKeys = orderedKeys(GROUP_ORDER, new Set(groupSeen.keys()));
+  if (groupKeys.length) {
+    parts.push("<h2>关系组</h2>");
+    for (const key of groupKeys) {
+      const all = state.links.filter((edge) => edge.group === key);
+      parts.push(row(
+        GROUP_COLOR[key] || "#6d655b",
+        groupSeen.get(key),
+        all.filter(linkShown).length,
+        all.length,
+        "showGroup",
+        key,
+        state.showGroup[key] !== false
+      ));
+    }
+  }
+  document.getElementById("legend-body").innerHTML = parts.join("") || "<p class='meta'>还没有记忆</p>";
 }
 
 function renderMemories() {
+  rebuildView();
   const root = document.getElementById("memories");
-  root.innerHTML = "";
+  const typeSeen = new Set();
+  for (const node of state.nodes) {
+    if (node.kind === "memory" && node.memory_type) typeSeen.add(node.memory_type);
+  }
+  const chips = orderedKeys(TYPE_ORDER, typeSeen).map((key) => {
+    const all = state.nodes.filter((node) => node.kind === "memory" && node.memory_type === key);
+    return row(
+      TYPE_COLOR[key] || "#444",
+      TYPE_LABEL[key] || key,
+      all.filter(nodeShown).length,
+      all.length,
+      "showType",
+      key,
+      state.showType[key] !== false
+    );
+  }).join("");
+  const cards = [];
   for (const memory of state.memories) {
-    const card = document.createElement("article");
-    card.className = "card";
-    card.innerHTML = "<strong>" + esc(memory.statement || memory.gist) + "</strong>" +
+    if (!memoryListed(memory)) continue;
+    cards.push(
+      "<article class='card' data-memory='" + esc(memory.id) + "'>" +
+      "<strong>" + esc(memory.statement || memory.gist) + "</strong>" +
       "<div class='meta'>" + esc(memory.type) + " · " + esc(memory.clarity) +
       " · 强度 " + esc(memory.strength) + " · " + esc(memory.stage) +
-      " · " + esc(memory.state) + " · " + esc(memory.source) + "</div>";
-    card.onclick = () => {
-      state.highlight = { neurons: memory.neuron_ids.slice(), synapses: memory.synapse_ids.slice() };
-      show("graph");
-      renderDetail("<dl>" + memoryFields(memory) + "</dl>");
-    };
-    root.appendChild(card);
+      " · " + esc(memory.state) + " · " + esc(memory.source) + "</div></article>"
+    );
   }
+  const empty = state.memories.length ? "这一类里还没有记忆" : "还没有记忆";
+  root.innerHTML = "<div class='chips'>" + chips + "</div>" +
+    (cards.join("") || "<p class='meta'>" + empty + "</p>");
 }
 
 function renderJournal() {
@@ -206,7 +466,8 @@ function renderJournal() {
     "</td><td>" + esc(row.op) + "</td><td>" + esc(row.status) + "</td><td>" + esc(row.label) +
     "</td><td>" + esc(row.reason) + "</td></tr>").join("");
   document.getElementById("journal").innerHTML =
-    "<table><tr><th>时间</th><th>时机</th><th>动作</th><th>结果</th><th>内容</th><th>说明</th></tr>" + rows + "</table>";
+    "<table><tr><th>时间</th><th>时机</th><th>动作</th><th>结果</th><th>内容</th><th>说明</th></tr>" +
+    rows + "</table>";
 }
 
 function renderMind() {
@@ -223,102 +484,339 @@ function renderMind() {
     "</dl><h3>出生时读到的身份信</h3><pre>" + esc(mind.identity_text) + "</pre>";
 }
 
-const canvas = document.getElementById("canvas");
-const ctx = canvas.getContext("2d");
-
-function resize() {
-  const stage = document.getElementById("stage");
-  const ratio = window.devicePixelRatio || 1;
-  canvas.width = stage.clientWidth * ratio;
-  canvas.height = stage.clientHeight * ratio;
-  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+function onFilterChange(event) {
+  const input = event.target;
+  if (!input || input.tagName !== "INPUT" || !input.dataset.map) return;
+  state[input.dataset.map][input.dataset.key] = input.checked;
+  if (state.selected) {
+    const node = state.byId[state.selected];
+    if (!node || !kindVisible(node)) clearSelection(false);
+  }
+  renderLegend();
+  renderMemories();
+  relayout();
 }
 
-function layout() {
-  const width = document.getElementById("stage").clientWidth || 640;
-  const height = document.getElementById("stage").clientHeight || 480;
-  const count = state.nodes.length || 1;
-  state.nodes.forEach((node, index) => {
-    const angle = (Math.PI * 2 * index) / count;
-    node.x = width / 2 + Math.cos(angle) * Math.min(width, height) * 0.28;
-    node.y = height / 2 + Math.sin(angle) * Math.min(width, height) * 0.28;
-    node.vx = 0;
-    node.vy = 0;
+document.getElementById("legend-body").addEventListener("change", onFilterChange);
+document.getElementById("memories").addEventListener("change", onFilterChange);
+document.getElementById("memories").addEventListener("click", (event) => {
+  const card = event.target.closest(".card");
+  if (!card) return;
+  const memory = state.memories.find((item) => item.id === card.dataset.memory);
+  if (memory) openMemory(memory);
+});
+
+function viewSize() {
+  const stage = document.getElementById("stage");
+  return {
+    width: stage.clientWidth || 640,
+    height: stage.clientHeight || 480
+  };
+}
+
+function resize() {
+  const size = viewSize();
+  state.ratio = window.devicePixelRatio || 1;
+  canvas.width = size.width * state.ratio;
+  canvas.height = size.height * state.ratio;
+  drawSoon();
+}
+
+function clusterKey(node) {
+  if (node.kind === "memory") return "memory:" + (node.memory_type || "");
+  return node.kind;
+}
+
+function placeVisible() {
+  rebuildView();
+  const groups = new Map();
+  for (const node of state.nodes) {
+    if (!nodeShown(node) || node.pinned) continue;
+    const key = clusterKey(node);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(node);
+  }
+  const keys = [...groups.keys()].sort();
+  const cols = Math.max(1, Math.ceil(Math.sqrt(keys.length)));
+  keys.forEach((key, index) => {
+    const members = groups.get(key);
+    const cx = (index % cols) * 280;
+    const cy = Math.floor(index / cols) * 280;
+    members.forEach((node, member) => {
+      const angle = (Math.PI * 2 * member) / Math.max(members.length, 1);
+      const radius = members.length === 1 ? 0 : 40 + members.length * 4;
+      node.x = cx + Math.cos(angle) * radius;
+      node.y = cy + Math.sin(angle) * radius;
+      node.vx = 0;
+      node.vy = 0;
+    });
   });
 }
 
+function pushApart(left, right) {
+  let dx = right.x - left.x;
+  let dy = right.y - left.y;
+  let dist = Math.hypot(dx, dy);
+  if (dist < 0.1) {
+    dx = 0.1;
+    dy = 0;
+    dist = 0.1;
+  }
+  if (dist >= 90) return;
+  const force = (90 - dist) * 0.08;
+  const ux = dx / dist;
+  const uy = dy / dist;
+  if (!left.pinned) {
+    left.vx -= ux * force;
+    left.vy -= uy * force;
+  }
+  if (!right.pinned) {
+    right.vx += ux * force;
+    right.vy += uy * force;
+  }
+}
+
 function step() {
-  const width = document.getElementById("stage").clientWidth || 640;
-  const height = document.getElementById("stage").clientHeight || 480;
-  const nodes = state.nodes;
-  for (let i = 0; i < nodes.length; i++) {
-    for (let j = i + 1; j < nodes.length; j++) {
-      let dx = nodes[j].x - nodes[i].x;
-      let dy = nodes[j].y - nodes[i].y;
-      let dist = Math.hypot(dx, dy) || 0.1;
-      const force = 800 / (dist * dist);
-      dx /= dist; dy /= dist;
-      nodes[i].vx -= dx * force; nodes[i].vy -= dy * force;
-      nodes[j].vx += dx * force; nodes[j].vy += dy * force;
+  rebuildView();
+  const moving = state.nodes.filter(nodeShown);
+  if (moving.length > 400) {
+    const cell = 90;
+    const bins = new Map();
+    for (const node of moving) {
+      const key = Math.floor(node.x / cell) + ":" + Math.floor(node.y / cell);
+      if (!bins.has(key)) bins.set(key, []);
+      bins.get(key).push(node);
+    }
+    for (const node of moving) {
+      const cx = Math.floor(node.x / cell);
+      const cy = Math.floor(node.y / cell);
+      for (let ix = cx - 1; ix <= cx + 1; ix++) {
+        for (let iy = cy - 1; iy <= cy + 1; iy++) {
+          for (const other of bins.get(ix + ":" + iy) || []) {
+            if (other.id > node.id) pushApart(node, other);
+          }
+        }
+      }
+    }
+  } else {
+    for (let i = 0; i < moving.length; i++) {
+      for (let j = i + 1; j < moving.length; j++) pushApart(moving[i], moving[j]);
     }
   }
   for (const edge of state.links) {
+    if (!linkShown(edge)) continue;
     const left = state.byId[edge.source_id];
     const right = state.byId[edge.target_id];
-    if (!left || !right) continue;
-    const dx = right.x - left.x;
-    const dy = right.y - left.y;
-    left.vx += dx * 0.01; left.vy += dy * 0.01;
-    right.vx -= dx * 0.01; right.vy -= dy * 0.01;
+    let dx = right.x - left.x;
+    let dy = right.y - left.y;
+    let dist = Math.hypot(dx, dy);
+    if (dist < 0.1) {
+      dx = 0.1;
+      dy = 0;
+      dist = 0.1;
+    }
+    const force = (dist - 140) * 0.02;
+    const ux = (dx / dist) * force;
+    const uy = (dy / dist) * force;
+    if (!left.pinned) {
+      left.vx += ux;
+      left.vy += uy;
+    }
+    if (!right.pinned) {
+      right.vx -= ux;
+      right.vy -= uy;
+    }
   }
-  for (const node of nodes) {
-    node.vx += (width / 2 - node.x) * 0.01;
-    node.vy += (height / 2 - node.y) * 0.01;
-    node.vx *= 0.6; node.vy *= 0.6;
-    node.x = Math.max(24, Math.min(width - 24, node.x + node.vx));
-    node.y = Math.max(24, Math.min(height - 24, node.y + node.vy));
+  let max = 0;
+  for (const node of moving) {
+    if (node.pinned) {
+      node.vx = 0;
+      node.vy = 0;
+      continue;
+    }
+    node.vx *= 0.85;
+    node.vy *= 0.85;
+    const speed = Math.hypot(node.vx, node.vy);
+    if (speed > 40) {
+      node.vx *= 40 / speed;
+      node.vy *= 40 / speed;
+    }
+    node.x += node.vx;
+    node.y += node.vy;
+    max = Math.max(max, Math.hypot(node.vx, node.vy));
+  }
+  if (max < 0.05) state.calm += 1;
+  else state.calm = 0;
+  if (state.calm >= 30) {
+    state.sim = false;
+    if (state.fitWhenCalm) {
+      state.fitWhenCalm = false;
+      applyFit(state.nodes.filter(nodeShown));
+    }
   }
 }
 
-function highlighted(id, key) {
-  return state.highlight && state.highlight[key].indexOf(id) >= 0;
+function nodeColor(node) {
+  if (node.kind === "memory" && TYPE_COLOR[node.memory_type]) return TYPE_COLOR[node.memory_type];
+  return KIND[node.kind] || "#444";
+}
+
+function hotNode(node) {
+  return state.selected === node.id || (state.selected && state.view.nodes.has(node.id));
+}
+
+function showName(node, hot) {
+  if (node.is_user || node.is_self) return true;
+  if (hot) return true;
+  return state.camera.k > 0.6;
+}
+
+function queryHit(node) {
+  const query = state.query.trim().toLowerCase();
+  if (!query) return false;
+  const memory = state.byAnchor[node.id];
+  const blob = [
+    node.name,
+    ...(node.aliases || []),
+    memory ? memory.statement : "",
+    memory ? memory.gist : ""
+  ].join("\n").toLowerCase();
+  return blob.includes(query);
 }
 
 function draw() {
-  const width = document.getElementById("stage").clientWidth || 640;
-  const height = document.getElementById("stage").clientHeight || 480;
-  ctx.clearRect(0, 0, width, height);
-  ctx.font = "12px sans-serif";
+  const size = viewSize();
+  const ratio = state.ratio || 1;
+  const camera = state.camera;
+  rebuildView();
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.clearRect(0, 0, size.width, size.height);
+  const shown = state.nodes.filter(nodeShown);
+  if (!shown.length) {
+    ctx.fillStyle = "#6d655b";
+    ctx.font = "15px sans-serif";
+    ctx.fillText("还没有记忆", 24, 40);
+    return;
+  }
+  ctx.setTransform(ratio * camera.k, 0, 0, ratio * camera.k, ratio * camera.x, ratio * camera.y);
+  ctx.lineWidth = 1 / camera.k;
+  ctx.font = (12 / camera.k) + "px sans-serif";
+  const dim = Boolean(state.selected) && !state.focusOnly;
   for (const edge of state.links) {
+    if (!linkShown(edge)) continue;
     const left = state.byId[edge.source_id];
     const right = state.byId[edge.target_id];
-    if (!left || !right) continue;
-    const hot = state.highlight && highlighted(edge.id, "synapses");
-    ctx.strokeStyle = hot ? "#1c1915" : (edge.grown ? "#d8cfc0" : "#b7ad9e");
-    ctx.lineWidth = hot ? 2.4 : 1;
+    const near = state.view.edges.has(edge.id);
+    ctx.globalAlpha = dim && !near ? 0.15 : 1;
+    ctx.strokeStyle = near ? "#1c1915" : (edge.grown ? "#d8cfc0" : "#b7ad9e");
+    ctx.lineWidth = (near ? 2.4 : 1) / camera.k;
     ctx.beginPath();
     ctx.moveTo(left.x, left.y);
     ctx.lineTo(right.x, right.y);
     ctx.stroke();
-    const label = edge.type_label + (edge.innate ? " · 天生" : "");
-    ctx.fillStyle = "#6d655b";
-    ctx.fillText(label, (left.x + right.x) / 2, (left.y + right.y) / 2);
+    if (camera.k > 1.1 || near) {
+      const label = edge.type_label + (edge.innate ? " · 天生" : "");
+      ctx.fillStyle = "#6d655b";
+      ctx.fillText(label, (left.x + right.x) / 2, (left.y + right.y) / 2);
+    }
   }
-  for (const node of state.nodes) {
-    const hot = state.highlight && highlighted(node.id, "neurons");
+  for (const node of shown) {
+    const hot = hotNode(node);
+    ctx.globalAlpha = dim && !hot ? 0.15 : 1;
+    const radius = (hot ? 11 : (node.kind === "memory" ? 6 : 8)) / camera.k;
     ctx.beginPath();
-    ctx.fillStyle = KIND[node.kind] || "#444";
-    ctx.arc(node.x, node.y, hot ? 11 : (node.kind === "memory" ? 6 : 8), 0, Math.PI * 2);
+    ctx.fillStyle = nodeColor(node);
+    ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
     ctx.fill();
     if (node.innate) {
       ctx.strokeStyle = "#1c1915";
+      ctx.lineWidth = 1 / camera.k;
       ctx.stroke();
     }
-    ctx.fillStyle = "#1c1915";
-    const text = String(node.name || "");
-    ctx.fillText(text.length > 16 ? text.slice(0, 16) + "…" : text, node.x + 12, node.y + 4);
+    if (queryHit(node)) {
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, radius + 4 / camera.k, 0, Math.PI * 2);
+      ctx.strokeStyle = "#1c1915";
+      ctx.lineWidth = 2 / camera.k;
+      ctx.stroke();
+    }
+    if (showName(node, hot)) {
+      ctx.fillStyle = "#1c1915";
+      const text = String(node.name || "");
+      ctx.fillText(text.length > 16 ? text.slice(0, 16) + "…" : text, node.x + 12 / camera.k, node.y + 4 / camera.k);
+    }
   }
-  requestAnimationFrame(() => { step(); draw(); });
+  ctx.globalAlpha = 1;
+}
+
+function requestFrame() {
+  if (state.frame) return;
+  const loop = () => {
+    if (state.sim) step();
+    draw();
+    state.frame = state.sim ? requestAnimationFrame(loop) : 0;
+  };
+  state.frame = requestAnimationFrame(loop);
+}
+
+function drawSoon() {
+  requestFrame();
+}
+
+function relayout() {
+  placeVisible();
+  state.calm = 0;
+  state.sim = true;
+  state.fitWhenCalm = true;
+  requestFrame();
+}
+
+function applyFit(nodes) {
+  const size = viewSize();
+  if (!nodes.length || size.width < 10 || size.height < 10) return;
+  const legend = document.getElementById("legend");
+  const toolbar = document.getElementById("toolbar");
+  const leftInset = Math.min((legend ? legend.offsetWidth : 0) + 24, size.width * 0.4);
+  const topInset = (toolbar ? toolbar.offsetHeight : 0) + 16;
+  const usableWidth = Math.max(40, size.width - leftInset - 16);
+  const usableHeight = Math.max(40, size.height - topInset - 16);
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const node of nodes) {
+    minX = Math.min(minX, node.x);
+    minY = Math.min(minY, node.y);
+    maxX = Math.max(maxX, node.x);
+    maxY = Math.max(maxY, node.y);
+  }
+  const boundsWidth = Math.max(maxX - minX, 40);
+  const boundsHeight = Math.max(maxY - minY, 40);
+  const k = Math.min(
+    4,
+    Math.max(0.25, Math.min(usableWidth / boundsWidth, usableHeight / boundsHeight))
+  );
+  state.camera.k = k;
+  state.camera.x = leftInset + usableWidth / 2 - ((minX + maxX) / 2) * k;
+  state.camera.y = topInset + usableHeight / 2 - ((minY + maxY) / 2) * k;
+}
+
+function fitVisible() {
+  rebuildView();
+  state.fitWhenCalm = false;
+  applyFit(state.nodes.filter(nodeShown));
+  drawSoon();
+}
+
+function zoomAt(point, factor) {
+  const world = toWorld(point);
+  const next = Math.min(4, Math.max(0.25, state.camera.k * factor));
+  state.camera.k = next;
+  state.camera.x = point.x - world.x * next;
+  state.camera.y = point.y - world.y * next;
+  state.fitWhenCalm = false;
+  drawSoon();
 }
 
 function pointer(event) {
@@ -326,26 +824,46 @@ function pointer(event) {
   return { x: event.clientX - rect.left, y: event.clientY - rect.top };
 }
 
-canvas.onclick = (event) => {
-  const point = pointer(event);
+function toWorld(point) {
+  return {
+    x: (point.x - state.camera.x) / state.camera.k,
+    y: (point.y - state.camera.y) / state.camera.k
+  };
+}
+
+function hitNode(point) {
+  rebuildView();
+  const world = toWorld(point);
   let nearest = null;
-  let best = 18;
+  let best = 18 / state.camera.k;
   for (const node of state.nodes) {
-    const dist = Math.hypot(node.x - point.x, node.y - point.y);
-    if (dist < best) { best = dist; nearest = node; }
+    if (!nodeShown(node)) continue;
+    const dist = Math.hypot(node.x - world.x, node.y - world.y);
+    if (dist < best) {
+      best = dist;
+      nearest = node;
+    }
   }
-  if (nearest) { pickNode(nearest); return; }
-  let edgeHit = null;
-  let edgeBest = 8;
+  return nearest;
+}
+
+function hitEdge(point) {
+  rebuildView();
+  const world = toWorld(point);
+  let nearest = null;
+  let best = 8 / state.camera.k;
   for (const edge of state.links) {
+    if (!linkShown(edge)) continue;
     const left = state.byId[edge.source_id];
     const right = state.byId[edge.target_id];
-    if (!left || !right) continue;
-    const dist = distanceToSegment(point, left, right);
-    if (dist < edgeBest) { edgeBest = dist; edgeHit = edge; }
+    const dist = distanceToSegment(world, left, right);
+    if (dist < best) {
+      best = dist;
+      nearest = edge;
+    }
   }
-  if (edgeHit) pickEdge(edgeHit);
-};
+  return nearest;
+}
 
 function distanceToSegment(point, left, right) {
   const dx = right.x - left.x;
@@ -356,23 +874,174 @@ function distanceToSegment(point, left, right) {
   return Math.hypot(point.x - (left.x + t * dx), point.y - (left.y + t * dy));
 }
 
+function clearSelection(redraw) {
+  state.selected = null;
+  state.focusOnly = false;
+  setFocusButton();
+  showHint();
+  if (redraw !== false) drawSoon();
+}
+
+function selectNode(node, keepFocus) {
+  if (!keepFocus) state.focusOnly = false;
+  state.selected = node.id;
+  setFocusButton();
+  pickNode(node);
+  drawSoon();
+}
+
+function neighborhoodNodes() {
+  rebuildView();
+  if (!state.selected || !state.view.nodes.size) return [];
+  return [...state.view.nodes].map((id) => state.byId[id]).filter(Boolean);
+}
+
+function openMemory(memory) {
+  const node = state.byId[memory.anchor_id];
+  if (!node) return;
+  if (state.showKind.memory === false) {
+    state.showKind.memory = true;
+    renderLegend();
+    renderMemories();
+  }
+  show("graph");
+  selectNode(node, false);
+  applyFit(neighborhoodNodes());
+  state.fitWhenCalm = false;
+  drawSoon();
+}
+
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+
+document.getElementById("zoom-in").onclick = () => {
+  const size = viewSize();
+  zoomAt({ x: size.width / 2, y: size.height / 2 }, 1.25);
+};
+document.getElementById("zoom-out").onclick = () => {
+  const size = viewSize();
+  zoomAt({ x: size.width / 2, y: size.height / 2 }, 0.8);
+};
+document.getElementById("zoom-fit").onclick = () => fitVisible();
+document.getElementById("focus-toggle").onclick = () => {
+  if (!state.selected) return;
+  state.focusOnly = !state.focusOnly;
+  setFocusButton();
+  state.calm = 0;
+  state.sim = true;
+  state.fitWhenCalm = true;
+  requestFrame();
+};
+document.getElementById("search").addEventListener("input", (event) => {
+  state.query = event.target.value;
+  drawSoon();
+});
+document.getElementById("search").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  rebuildView();
+  const hits = state.nodes.filter((node) => nodeShown(node) && queryHit(node));
+  if (!hits.length) return;
+  state.fitWhenCalm = false;
+  applyFit(hits);
+  drawSoon();
+});
+canvas.addEventListener("wheel", (event) => {
+  event.preventDefault();
+  const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
+  zoomAt(pointer(event), factor);
+}, { passive: false });
+canvas.addEventListener("pointerdown", (event) => {
+  try { canvas.setPointerCapture(event.pointerId); } catch (error) { /* 合成事件没有活动指针 */ }
+  const point = pointer(event);
+  const node = hitNode(point);
+  const world = toWorld(point);
+  state.drag = {
+    x: event.clientX,
+    y: event.clientY,
+    lastX: event.clientX,
+    lastY: event.clientY,
+    moved: false,
+    node: node,
+    offsetX: node ? world.x - node.x : 0,
+    offsetY: node ? world.y - node.y : 0
+  };
+});
+canvas.addEventListener("pointermove", (event) => {
+  const drag = state.drag;
+  if (!drag) return;
+  if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 4) drag.moved = true;
+  if (!drag.moved) return;
+  state.fitWhenCalm = false;
+  if (drag.node) {
+    const world = toWorld(pointer(event));
+    drag.node.x = world.x - drag.offsetX;
+    drag.node.y = world.y - drag.offsetY;
+    drag.node.pinned = true;
+    drag.node.vx = 0;
+    drag.node.vy = 0;
+    state.sim = true;
+    state.calm = 0;
+    requestFrame();
+    return;
+  }
+  state.camera.x += event.clientX - drag.lastX;
+  state.camera.y += event.clientY - drag.lastY;
+  drag.lastX = event.clientX;
+  drag.lastY = event.clientY;
+  drawSoon();
+});
+canvas.addEventListener("pointerup", (event) => {
+  const drag = state.drag;
+  state.drag = null;
+  if (!drag || drag.moved) return;
+  const point = pointer(event);
+  if (drag.node) {
+    selectNode(drag.node, true);
+    return;
+  }
+  const edge = hitEdge(point);
+  if (edge) {
+    pickEdge(edge);
+    drawSoon();
+    return;
+  }
+  clearSelection(true);
+});
+canvas.addEventListener("pointercancel", () => {
+  state.drag = null;
+});
+canvas.addEventListener("dblclick", (event) => {
+  const node = hitNode(pointer(event));
+  if (!node) return;
+  selectNode(node, true);
+  applyFit(neighborhoodNodes());
+  state.fitWhenCalm = false;
+  drawSoon();
+});
+
 async function load() {
   const graph = await (await fetch("/api/graph")).json();
   state.links = graph.links;
   state.memories = graph.memories;
   state.journal = graph.journal;
   state.mind = graph.mind;
-  state.nodes = graph.nodes.map((node) => Object.assign({ x: 0, y: 0, vx: 0, vy: 0 }, node));
+  state.nodes = graph.nodes.map((node) => Object.assign({ x: 0, y: 0, vx: 0, vy: 0, pinned: false }, node));
   state.byId = {};
   for (const node of state.nodes) state.byId[node.id] = node;
   state.byAnchor = {};
   for (const memory of state.memories) state.byAnchor[memory.anchor_id] = memory;
+  for (const node of state.nodes) {
+    state.showKind[node.kind] = true;
+    if (node.kind === "memory" && node.memory_type) state.showType[node.memory_type] = true;
+  }
+  for (const edge of state.links) state.showGroup[edge.group] = true;
+  renderLegend();
   renderMemories();
   renderJournal();
   renderMind();
   resize();
-  layout();
-  draw();
+  relayout();
 }
 
 window.addEventListener("resize", resize);

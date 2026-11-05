@@ -35,9 +35,25 @@ def test_page_reads_graph_memories_and_journal_without_the_writer_lock(
         assert any(memory["type"] == "天生" for memory in graph["memories"])
         assert graph["journal"]
         assert graph["mind"]["baseline_mood"] == "开朗"
+        groups = {
+            "element": "成分",
+            "social": "社会",
+            "possession": "拥有",
+            "attitude": "态度",
+            "sequence": "先后",
+            "revision": "修订",
+            "grown": "一起被想起",
+        }
+        assert graph["links"]
+        for link in graph["links"]:
+            assert link["group"] in groups
+            assert link["group_label"] == groups[link["group"]]
         with urlopen(base + "/", timeout=5) as response:
             page = response.read().decode("utf-8")
         assert "只读" in page and "Simple Browser" in page
+        for word in ("放大", "缩小", "看全图", "图例", "只留相连"):
+            assert word in page
+        assert "<script src=" not in page
     finally:
         httpd.shutdown()
         thread.join(timeout=3)

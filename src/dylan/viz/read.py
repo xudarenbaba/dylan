@@ -19,6 +19,22 @@ from dylan.memory.physiology import clarity, link_weight
 from dylan.memory.render import content
 from dylan.memory.store import MemoryStore
 
+_GROUP_LABELS = {
+    "element": "成分",
+    "social": "社会",
+    "possession": "拥有",
+    "attitude": "态度",
+    "sequence": "先后",
+    "revision": "修订",
+    "grown": "一起被想起",
+}
+
+
+def _link_group(synapse_type: str) -> tuple[str, str]:
+    spec = RELATIONS.get(synapse_type)
+    group = spec[1] if spec is not None else synapse_type
+    return group, _GROUP_LABELS.get(group, group)
+
 
 def graph_payload(path: Path, tz: tzinfo, clock: Clock | None = None) -> dict[str, object]:
     store = MemoryStore.open_readonly(path, clock or SystemClock())
@@ -44,20 +60,24 @@ def graph_payload(path: Path, tz: tzinfo, clock: Clock | None = None) -> dict[st
                     "is_self": neuron.id == meta["self_id"],
                 }
             )
-        links = [
-            {
-                "id": synapse.id,
-                "source_id": synapse.source_id,
-                "target_id": synapse.target_id,
-                "type": synapse.type,
-                "type_label": RELATIONS.get(synapse.type, (synapse.type,))[0],
-                "label": synapse.label,
-                "weight": round(link_weight(synapse, now), 3),
-                "innate": synapse.innate,
-                "grown": synapse.type == "co_recalled",
-            }
-            for synapse in store.synapses()
-        ]
+        links = []
+        for synapse in store.synapses():
+            group, group_label = _link_group(synapse.type)
+            links.append(
+                {
+                    "id": synapse.id,
+                    "source_id": synapse.source_id,
+                    "target_id": synapse.target_id,
+                    "type": synapse.type,
+                    "type_label": RELATIONS.get(synapse.type, (synapse.type,))[0],
+                    "group": group,
+                    "group_label": group_label,
+                    "label": synapse.label,
+                    "weight": round(link_weight(synapse, now), 3),
+                    "innate": synapse.innate,
+                    "grown": synapse.type == "co_recalled",
+                }
+            )
         memories = [
             {
                 "id": fiber.id,
