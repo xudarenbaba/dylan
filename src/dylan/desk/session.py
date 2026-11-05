@@ -17,7 +17,7 @@ from dylan.memory.life import letter_changed
 from dylan.memory.store import MemoryStore
 from dylan.memory.text import mask_secrets
 
-SETTLING = "在整理今天的相处"
+SETTLING = "在整理这次相处"
 _FAILED = "这次没有完成"
 
 
