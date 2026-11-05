@@ -197,7 +197,7 @@ class Conversation:
             awareness=awareness.text,
             recalled=recalled,
             turns=self.turns[-self.settings.dylan_buffer_turns :],
-            user_text=text,
+            user_text=masked,
         )
         chunks: list[str] = []
         try:

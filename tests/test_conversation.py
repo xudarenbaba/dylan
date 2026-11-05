@@ -145,6 +145,7 @@ def test_a_secret_in_what_he_says_is_masked(tmp_path: Path, clock, invoke) -> No
     code, _out, err, model = invoke(db, [f"我的密钥是 {token}", "exit"])
     assert code == 0
     assert "像密钥的部分没有记住" in err
+    assert token not in str(model.seen)
     for kind, messages in model.json_seen:
         assert token not in str(messages), kind
     store = _open(db, clock)
