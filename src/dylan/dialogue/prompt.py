@@ -1,4 +1,4 @@
-"""What she is told before she speaks, writes a note, sleeps, or reads her letter."""
+"""What she is told before she replies, decides to speak first, notes, sleeps, or is born."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from pathlib import Path
 
 from dylan.clock import local_stamp
 from dylan.memory.constants import (
+    HER_TURN,
     MEMORY_LINKS,
     MEMORY_TYPES,
     NODE_KINDS,
@@ -21,6 +22,7 @@ _GUIDES = Path(__file__).with_name("guides")
 BIRTH_MARK = "〔出生〕"
 NOTE_MARK = "〔记下这一刻〕"
 SLEEP_MARK = "〔睡眠整理〕"
+INITIATIVE_MARK = "〔先开口〕"
 RECALLED_HEAD = "此刻想起的事："
 NOTHING_RECALLED = "（没有想起什么特别的）"
 
@@ -77,6 +79,7 @@ _SLEEP_SHAPE = {
     "mood": {"label": "满足", "intensity": 0.4, "cause": "原因"},
     "summary": "这次聊天的梗概",
 }
+_INITIATIVE_SHAPE = {"speak": False, "line": "一句口语，不说就空着"}
 _BIRTH_SHAPE = {
     "user_name": "写信的人",
     "self_name": "dylan",
@@ -129,7 +132,8 @@ def reply_messages(
         {"role": "system", "content": mind},
     ]
     for said, answered in turns:
-        messages.append({"role": "user", "content": said})
+        if said != HER_TURN:
+            messages.append({"role": "user", "content": said})
         messages.append({"role": "assistant", "content": answered})
     messages.append({"role": "user", "content": user_text})
     return messages
@@ -157,12 +161,16 @@ def note_messages(
     summary: str,
 ) -> list[dict[str, str]]:
     user_name, self_name = who
-    earlier = "\n".join(f"他：{said}\n你：{answered}" for said, answered in recent) or "（没有）"
+    earlier = "\n".join(_spoken(said, answered) for said, answered in recent) or "（没有）"
+    if user_text == HER_TURN:
+        this_turn = f"这一轮是你先开口，他没有说话。\n你：{reply_text}\n"
+    else:
+        this_turn = f"这一轮：\n他：{user_text}\n你：{reply_text}\n"
     body = (
         f"现在是 {local_stamp(now, tz)}。他是{user_name}，你是{self_name}。\n"
         f"这次聊天到目前为止：{summary or '（刚开始）'}\n\n"
         f"再往前几轮：\n{earlier}\n\n"
-        f"这一轮：\n他：{user_text}\n你：{reply_text}\n\n"
+        f"{this_turn}\n"
         f"可能相关的旧记忆：\n{candidates}"
     )
     return [_system(NOTE_MARK, "note", _NOTE_SHAPE), {"role": "user", "content": body}]
@@ -185,6 +193,35 @@ def sleep_messages(
         f"这次新增或改动的记忆，以及相关的旧记忆：\n{candidates}"
     )
     return [_system(SLEEP_MARK, "sleep", _SLEEP_SHAPE), {"role": "user", "content": body}]
+
+
+def initiative_messages(
+    *,
+    letter: str,
+    awareness: str,
+    situation: str,
+    now: datetime,
+    tz: tzinfo,
+    who: tuple[str, str],
+) -> list[dict[str, str]]:
+    user_name, self_name = who
+    guide = f"{INITIATIVE_MARK}\n{_guide('initiative')}\n\n格式：{_dump(_INITIATIVE_SHAPE)}"
+    body = (
+        f"现在是 {local_stamp(now, tz)}。他是{user_name}，你是{self_name}。\n"
+        f"{awareness}\n\n"
+        f"{situation}"
+    )
+    return [
+        {"role": "system", "content": letter.strip()},
+        {"role": "system", "content": guide},
+        {"role": "user", "content": body},
+    ]
+
+
+def _spoken(said: str, answered: str) -> str:
+    if said == HER_TURN:
+        return f"你先说：{answered}"
+    return f"他：{said}\n你：{answered}"
 
 
 def birth_messages(letter: str) -> list[dict[str, str]]:

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import queue
+import random
 import threading
 from collections.abc import Callable
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from dylan.cli.main import LETTER_CHANGED
@@ -12,13 +14,18 @@ from dylan.clock import Clock
 from dylan.config import Settings
 from dylan.dialogue.loop import Conversation, be_born, sleep_pending
 from dylan.errors import DylanError, StoreCorrupt
-from dylan.memory.constants import PRIVACY_NOTICE
+from dylan.memory.constants import (
+    INITIATIVE_IDLE_MAX_MINUTES,
+    INITIATIVE_IDLE_MIN_MINUTES,
+    PRIVACY_NOTICE,
+)
 from dylan.memory.life import letter_changed
 from dylan.memory.store import MemoryStore
 from dylan.memory.text import mask_secrets
 
 SETTLING = "在整理这次相处"
 _FAILED = "这次没有完成"
+_DUE = object()
 
 
 class DeskClosed(Exception):
@@ -132,6 +139,9 @@ class DeskSession:
         self._gate = threading.Lock()
         self._on_settled: Callable[[], None] | None = None
         self._fired = False
+        self._composing = threading.Event()
+        self._opened = threading.Event()
+        self._clock: Clock | None = None
         self._thread = threading.Thread(
             target=self._run,
             args=(path, clock, letter, model, settings, stderr),
@@ -155,6 +165,15 @@ class DeskSession:
                 found.append(self._events.get_nowait())
             except queue.Empty:
                 return found
+
+    def set_composing(self, active: bool) -> None:
+        if active:
+            self._composing.set()
+        else:
+            self._composing.clear()
+
+    def wait_opened(self, timeout: float = 5) -> bool:
+        return self._opened.wait(timeout)
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -182,10 +201,72 @@ class DeskSession:
         except Exception:
             return
 
+    def _cancelled(self) -> bool:
+        return self._stop.is_set() or self._composing.is_set() or not self._inbox.empty()
+
+    def _next_idle(self) -> datetime:
+        minutes = random.randint(INITIATIVE_IDLE_MIN_MINUTES, INITIATIVE_IDLE_MAX_MINUTES)
+        clock = self._clock
+        assert clock is not None
+        return clock.now() + timedelta(minutes=minutes)
+
+    def _wait(self, deadline: datetime | None) -> str | None | object:
+        while not self._stop.is_set():
+            timeout: float | None = None
+            if deadline is not None:
+                clock = self._clock
+                assert clock is not None
+                remaining = (deadline - clock.now()).total_seconds()
+                if remaining <= 0:
+                    return _DUE
+                timeout = min(0.2, remaining)
+            try:
+                return self._inbox.get(timeout=timeout)
+            except queue.Empty:
+                continue
+        try:
+            return self._inbox.get_nowait()
+        except queue.Empty:
+            return None
+
+    def _speak(
+        self, conversation: Conversation, writer: ReplyWriter, notices: NoticeStream
+    ) -> None:
+        if self._cancelled():
+            return
+        try:
+            spoke = conversation.consider(writer, notices, self._cancelled)
+        except DeskClosed:
+            raise
+        except Exception:
+            notices.write(_FAILED + "\n")
+            return
+        if spoke:
+            self._events.put({"kind": "end"})
+
     def _converse(self, conversation: Conversation, notices: NoticeStream) -> None:
         writer = ReplyWriter(self._events, self._stop)
+        deadline: datetime | None = None
+        try:
+            try:
+                self._speak(conversation, writer, notices)
+                deadline = self._next_idle()
+            except DeskClosed:
+                return
+        finally:
+            self._opened.set()
         while not self._stop.is_set():
-            item = self._inbox.get()
+            item = self._wait(deadline)
+            if item is _DUE:
+                if self._cancelled():
+                    deadline = self._next_idle()
+                    continue
+                try:
+                    self._speak(conversation, writer, notices)
+                except DeskClosed:
+                    return
+                deadline = self._next_idle()
+                continue
             if item is None or self._stop.is_set():
                 return
             try:
@@ -196,6 +277,8 @@ class DeskSession:
                 notices.write(_FAILED + "\n")
                 return
             self._events.put({"kind": "end"})
+            if not self._stop.is_set():
+                deadline = self._next_idle()
 
     def _run(
         self,
@@ -209,6 +292,7 @@ class DeskSession:
         store: MemoryStore | None = None
         conversation: Conversation | None = None
         notices = NoticeStream(stderr, self._events)
+        self._clock = clock
         try:
             store = _open_store(path, clock, letter, model, settings, notices)
             conversation = Conversation(store, settings, model, clock)

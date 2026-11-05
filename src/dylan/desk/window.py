@@ -28,6 +28,9 @@ class _Api:
     def poll(self) -> list[dict[str, str]]:
         return self._session.poll()
 
+    def composing(self, active: object = False) -> None:
+        self._session.set_composing(bool(active))
+
 
 class _Host:
     """Keep the window up while she settles, then let it close."""

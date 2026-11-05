@@ -125,7 +125,8 @@ def _about_self(fibers: list[Fiber], self_id: str) -> list[Fiber]:
     return sorted(mine, key=_rank, reverse=True)[:SELF_AWARE_LIMIT]
 
 
-def _waiting(fibers: list[Fiber], conflicted: set[str], now: datetime) -> list[Fiber]:
+def pending_plans(fibers: list[Fiber], now: datetime) -> list[Fiber]:
+    """Plans she is already holding: due soon, just overdue, or waiting on a trigger."""
     plans: list[Fiber] = []
     for fiber in fibers:
         if fiber.memory_type != "plan":
@@ -139,6 +140,11 @@ def _waiting(fibers: list[Fiber], conflicted: set[str], now: datetime) -> list[F
         elif fiber.trigger:
             plans.append(fiber)
     plans.sort(key=lambda fiber: fiber.due_at or "9999")
+    return plans
+
+
+def _waiting(fibers: list[Fiber], conflicted: set[str], now: datetime) -> list[Fiber]:
+    plans = pending_plans(fibers, now)
     disputes = sorted(
         (fiber for fiber in fibers if fiber.id in conflicted), key=_rank, reverse=True
     )

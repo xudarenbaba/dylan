@@ -647,6 +647,21 @@ class MemoryStore:
             "SELECT * FROM journal ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
 
+    def initiative_rows(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """
+            SELECT at, op, fiber_id, reason, label FROM journal
+            WHERE phase = 'initiative' AND op IN ('speak', 'heard')
+            ORDER BY id
+            """
+        ).fetchall()
+
+    def mark_he_replied(self) -> None:
+        """His real sentence clears an initiative he had not answered."""
+        rows = self.initiative_rows()
+        if rows and rows[-1]["op"] == "speak":
+            self.log("initiative", "heard", "ok")
+
     def touched_since(self, moment: str) -> list[str]:
         """Memories written or changed since a moment, most recent first."""
         rows = self.conn.execute(

@@ -9,6 +9,7 @@ from datetime import timedelta, tzinfo
 from dylan.clock import dump_time, load_time
 from dylan.memory.constants import (
     DEFAULT_BASELINE_MOOD,
+    HER_TURN,
     LABEL_CHARS,
     MAX_NAME_CHARS,
     MAX_SLEEP_CANDIDATES,
@@ -16,7 +17,7 @@ from dylan.memory.constants import (
     RECALLABLE_STATES,
 )
 from dylan.memory.maintain import maintain
-from dylan.memory.model import Fiber, Mood, Session
+from dylan.memory.model import Fiber, Mood, Session, Turn
 from dylan.memory.ops import Context, Outcome, Writer
 from dylan.memory.store import MemoryStore
 from dylan.memory.text import clip, key_of, mask_secrets
@@ -130,10 +131,7 @@ def sleep_material(
             chosen.append(fiber)
     listed = [(handles.add(fiber), fiber) for fiber in chosen[:MAX_SLEEP_CANDIDATES]]
     turns = store.turns(session.id)
-    transcript = "\n".join(
-        f"{_clock(turn.at)} 他：{turn.user_text}\n{_clock(turn.at)} 她：{turn.reply_text}"
-        for turn in turns
-    )
+    transcript = "\n".join(_transcript_line(turn) for turn in turns)
     return listed, transcript
 
 
@@ -220,6 +218,13 @@ def _neighbours(store: MemoryStore, fibers: list[Fiber]) -> list[Fiber]:
             found.append(fiber)
     found.sort(key=lambda fiber: fiber.importance * fiber.strength, reverse=True)
     return found
+
+
+def _transcript_line(turn: Turn) -> str:
+    stamp = _clock(turn.at)
+    if turn.user_text == HER_TURN:
+        return f"{stamp} 她：{turn.reply_text}"
+    return f"{stamp} 他：{turn.user_text}\n{stamp} 她：{turn.reply_text}"
 
 
 def _clock(stamp: str) -> str:

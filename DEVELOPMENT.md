@@ -3,8 +3,8 @@
 | 项 | 内容 |
 | --- | --- |
 | 文档编号 | DYLAN-DEV-001 |
-| 版本 | 0.6 |
-| 状态 | 与需求规格 0.6、技术设计 0.6 对齐 |
+| 版本 | 0.8 |
+| 状态 | 与需求规格 0.8、技术设计 0.8 对齐 |
 | 日期 | 2026-11-05 |
 | 上位文档 | [REQUIREMENTS.md](REQUIREMENTS.md)、[TECHNICAL.md](TECHNICAL.md) |
 
@@ -26,7 +26,7 @@ cp .env.example .env
 ```text
 persona/identity.md        身份信。她出生时读一次
 src/dylan/cli/             命令入口
-src/dylan/dialogue/        对话循环、四种请求、guides/ 下的四份指引
+src/dylan/dialogue/        对话循环、五种请求、guides/ 下的五份指引
 src/dylan/llm/             DeepSeek 客户端、测试替身
 src/dylan/memory/          记忆的结构、生理、写入、想起、常驻意识、出生与睡眠
 src/dylan/viz/             只读记忆页
@@ -52,7 +52,7 @@ pytest
 ruff check src tests
 ```
 
-测试用 `FakeModel` 和可拨动的时钟，不访问网络。`FakeModel` 的 `notes`、`sleeps`、`births` 是三个剧本队列：放进字典就按顺序返回，放进异常就抛出；队列空了返回空操作。回答默认回显「此刻想起的事」，没有想起就说「没有印象」。
+测试用 `FakeModel` 和可拨动的时钟，不访问网络。`FakeModel` 的 `notes`、`sleeps`、`births`、`initiatives` 是剧本队列：放进字典就按顺序返回，放进异常就抛出。记下的队列空了返回空操作。先开口的队列空了返回不说，并且不会占用记下的队列。回答默认回显「此刻想起的事」，没有想起就说「没有印象」。
 
 `tests/conftest.py` 的 `note` 夹具可以直接把一组操作当作「她刚听到这句话、给出这样的回答」交给 `Writer`，用来测检查规则和生理规则。
 
@@ -64,6 +64,7 @@ ruff check src tests
 | 她怎么判断记什么 | `dialogue/guides/note.txt` |
 | 她睡觉时怎么整理 | `dialogue/guides/sleep.txt` |
 | 清晰度标记怎么解释给她 | `dialogue/guides/reply.txt` |
+| 她怎么决定要不要先开口 | `dialogue/guides/initiative.txt` |
 | 遗忘快慢、加强幅度、常驻意识长度 | `memory/constants.py`，并同步 TECHNICAL 第 4 节和对应测试 |
 | 新的记忆类型或关联 | `memory/constants.py` 的清单，并同步 REQUIREMENTS 第 4 节 |
 
@@ -84,7 +85,8 @@ DYLAN_DB=data/trial.db DYLAN_SHOW_MIND=true dylan
 | 改口 | 「我住杭州」，过几轮「我上个月搬到上海了」 | 取代，而不是两条并存的事实；问起时说以前在杭州 |
 | 让她忘掉 | 「我们别提我前任了，忘了吧」 | 淡忘指向那条记忆；不误伤别的；她不再主动提 |
 | 情绪 | 「今天被领导骂了，好难受」 | 记下事件和他的情绪；她先听他说 |
-| 跟进 | 「我明天下午三点面试」，隔天启动 | 常驻里出现这件事，她会问面试怎么样；之后说「过了」会完成打算 |
+| 跟进 | 「我明天下午三点面试」，隔天再开 `dylan desk` | 常驻里出现这件事。窗口开着且没人说话时，她可以自己决定要不要问起。命令行仍等他先说。之后说「过了」会完成打算 |
+| 窗口空着 | 打开 `dylan desk`，先不打字 | 隔 1 到 10 分钟她自己决定要不要先说一句，说什么由她定。命令行里不先说 |
 | 喜好变了 | 「我以前不吃辣，现在超爱」 | 取代喜好 |
 | 玩笑 | 「其实你是个男生吧哈哈」 | 不改变她的天性，最多记成一件事 |
 | 一起想象 | 「要是我们一起去看海就好了」 | 不记成发生过的事 |
@@ -104,3 +106,5 @@ DYLAN_DB=data/trial.db DYLAN_SHOW_MIND=true dylan
 | 0.4 | 2026-11-04 | 对齐需求 0.5 与技术设计 0.4：新模块、剧本式假模型、真实模型检查场景 |
 | 0.5 | 2026-11-05 | 本机对话窗口：依赖 pywebview，工作线程持有数据库，测试不打开真实窗口 |
 | 0.6 | 2026-11-05 | 对齐技术设计 0.6 |
+| 0.7 | 2026-11-05 | 窗口空着时可以先开口；命令行仍等他先说 |
+| 0.8 | 2026-11-05 | 对齐需求 0.8：说不说由她自己决定 |

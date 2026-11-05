@@ -10,9 +10,11 @@ from datetime import tzinfo
 
 from dylan.clock import Clock, zone
 from dylan.config import Settings
+from dylan.dialogue.initiative import accept, situation
 from dylan.dialogue.prompt import (
     birth_messages,
     candidate_lines,
+    initiative_messages,
     note_messages,
     reply_messages,
     sleep_messages,
@@ -20,6 +22,7 @@ from dylan.dialogue.prompt import (
 from dylan.errors import BirthFailed, DylanError
 from dylan.memory.awareness import build_awareness
 from dylan.memory.constants import (
+    HER_TURN,
     MAX_CANDIDATES,
     PRIVACY_NOTICE,
     SESSION_CANDIDATES,
@@ -169,6 +172,8 @@ class Conversation:
         if self.session is None:
             with self.store.transaction():
                 self.session = self.store.start_session()
+        with self.store.transaction():
+            self.store.mark_he_replied()
         masked, hidden = mask_secrets(text, self.settings.deepseek_api_key)
         if hidden:
             stderr.write(MASKED_NOTICE + "\n")  # type: ignore[attr-defined]
@@ -178,7 +183,8 @@ class Conversation:
             current_session=self.session.id,
             budget=self.settings.dylan_awareness_chars,
         )
-        context = [masked, *[said for said, _ in reversed(self.turns[-2:])]]
+        earlier = [said for said, _ in reversed(self.turns[-2:]) if said != HER_TURN]
+        context = [masked, *earlier]
         found = recall(
             self.store,
             context,
@@ -220,6 +226,70 @@ class Conversation:
         self._start_note(turn.id, masked, reply_masked, found, awareness.fiber_ids)
         self.turns.append((masked, reply_masked))
         self.carry = [hit.fiber.id for hit in found.hits][:3]
+
+    def consider(
+        self, stdout: object, stderr: object, cancelled: Callable[[], bool]
+    ) -> bool:
+        """Ask her whether to speak. Quiet writes nothing. She chooses the words."""
+        self._settle_note(stderr)
+        if cancelled():
+            self._mind(stderr, "〔先不说〕他正在说话")
+            return False
+        now = self.clock.now()
+        session_id = None if self.session is None else self.session.id
+        awareness = build_awareness(
+            self.store,
+            self.tz,
+            current_session=session_id,
+            budget=self.settings.dylan_awareness_chars,
+        )
+        messages = initiative_messages(
+            letter=self.letter,
+            awareness=awareness.text,
+            situation=situation(self.store, self.turns, self.settings.dylan_buffer_turns),
+            now=now,
+            tz=self.tz,
+            who=_names(self.store),
+        )
+        try:
+            proposal = self.model.complete_json(messages)  # type: ignore[attr-defined]
+        except Exception:
+            self._mind(stderr, "〔先不说〕这次没有想好")
+            return False
+        if cancelled():
+            self._mind(stderr, "〔先不说〕他正在说话")
+            return False
+        choice = accept(proposal)
+        if not choice.speak:
+            self._mind(stderr, "〔先不说〕她决定先等")
+            return False
+        if not choice.line:
+            self._mind(stderr, "〔先不说〕这句不能说")
+            return False
+        masked, hidden = mask_secrets(choice.line, self.settings.deepseek_api_key)
+        if hidden or not masked.strip():
+            self._mind(stderr, "〔先不说〕这句不能说")
+            return False
+        stdout.write(masked + "\n")  # type: ignore[attr-defined]
+        stdout.flush()  # type: ignore[attr-defined]
+        self._mind(stderr, "〔先说〕")
+        with self.store.transaction():
+            if self.session is None:
+                self.session = self.store.start_session()
+            turn = self.store.add_turn(self.session.id, HER_TURN, masked)
+            self.store.log(
+                "initiative",
+                "speak",
+                "spoken",
+                label=clip(masked, 80),
+            )
+        self._start_note(turn.id, HER_TURN, masked, Recall(), awareness.fiber_ids)
+        self.turns.append((HER_TURN, masked))
+        return True
+
+    def _mind(self, stderr: object, text: str) -> None:
+        if self.settings.dylan_show_mind:
+            stderr.write(text + "\n")  # type: ignore[attr-defined]
 
     def finish(self, stderr: object) -> None:
         self._settle_note(stderr)
@@ -319,7 +389,7 @@ def apply_note(
         phase="note",
         tz=tz,
         api_key=settings.deepseek_api_key,
-        user_text=pending.user_text,
+        user_text="" if pending.user_text == HER_TURN else pending.user_text,
         reply_text=pending.reply_text,
         handles=pending.handles,
         session_id=session_id,

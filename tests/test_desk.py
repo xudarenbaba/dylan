@@ -380,8 +380,272 @@ def test_the_page_is_local_and_text_can_be_selected() -> None:
     assert "http://" not in html and "https://" not in html
     assert "clipboard" not in html.lower()
     assert "isComposing" in html and "shiftKey" in html and "textContent" in html
+    assert "tellComposing" in html and "api.composing" in html
     assert "text_select=True" in window
+    assert "def composing" in window
     assert "on_top=False" in window and "fullscreen=False" in window
     assert "min_size=(300, 400)" in window
     assert "webview" not in session
     assert "sqlite3" not in session
+
+
+class HeldInitiative(FakeModel):
+    """Blocks inside the decision, so a send or typing can land before she writes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def complete_json(self, messages):
+        from dylan.llm.fake import request_kind
+
+        if request_kind(messages) == "initiative":
+            self.entered.set()
+            if not self.release.wait(5):
+                raise TimeoutError("held")
+        return super().complete_json(messages)
+
+
+def _with_plan(db: Path, clock) -> None:
+    from dylan.clock import zone
+    from dylan.memory.life import birth
+    from dylan.memory.ops import Context, Writer
+
+    tz = zone("Asia/Shanghai")
+    store = MemoryStore.create(db, clock)
+    try:
+        birth(store, LETTER, FakeModel().default_birth(LETTER), tz)
+        ctx = Context(
+            phase="note",
+            tz=tz,
+            api_key="",
+            user_text="我明天下午三点面试",
+            reply_text="",
+            handles={},
+        )
+        with store.transaction():
+            Writer(store, ctx).apply(
+                [
+                    {
+                        "op": "add",
+                        "type": "plan",
+                        "about": "赵旭",
+                        "statement": "问问赵旭面试怎么样",
+                        "evidence": "我明天下午三点面试",
+                        "source": "user",
+                        "trigger": "下次见面",
+                    }
+                ]
+            )
+    finally:
+        store.close()
+
+
+def test_opening_speaks_and_sleep_says_she_spoke(tmp_path: Path, clock) -> None:
+    db = tmp_path / "dylan.db"
+    _with_plan(db, clock)
+    model = FakeModel()
+    model.initiatives = [{"speak": True, "line": "面试怎么样了"}]
+    session, model, err, db = _open(tmp_path, clock, model)
+    found: list[dict[str, str]] = []
+    try:
+        _pull(
+            session,
+            found,
+            lambda ev: any(item.get("text") == "面试怎么样了\n" for item in ev),
+        )
+        assert not any("〔她先说〕" in item.get("text", "") for item in found)
+        session.request_stop()
+        _pull(session, found, lambda ev: any(item["kind"] == "closed" for item in ev))
+    finally:
+        session.join(5)
+    slept = str(model.calls("sleep"))
+    asked = str(model.calls("initiative"))
+    assert "问问赵旭面试怎么样" in asked
+    assert "可以先说的事" not in asked
+    assert "她：面试怎么样了" in slept
+    assert "他：〔她先说〕" not in slept
+    assert len(model.calls("note")) == 1
+    store = MemoryStore.open(db, clock)
+    try:
+        rows = store.initiative_rows()
+        assert rows[-1]["op"] == "speak"
+        assert rows[-1]["reason"] == ""
+        assert rows[-1]["fiber_id"] is None
+        assert store.counts()["turns"] == 0
+        assert store.sessions()[0].slept
+    finally:
+        store.close()
+    assert "〔" not in err.getvalue()
+
+
+def test_a_queued_send_or_typing_discards_the_draft(tmp_path: Path, clock) -> None:
+    db = tmp_path / "dylan.db"
+    _with_plan(db, clock)
+    model = HeldInitiative()
+    model.initiatives = [{"speak": True, "line": "面试怎么样了"}]
+    session, model, _err, db = _open(tmp_path, clock, model)
+    found: list[dict[str, str]] = []
+    try:
+        assert model.entered.wait(5)
+        session.send("你好")
+        model.release.set()
+        _pull(session, found, lambda ev: any(item["kind"] == "end" for item in ev))
+        assert all("面试怎么样了" not in item.get("text", "") for item in found)
+    finally:
+        model.release.set()
+        _stop(session, model)
+    store = MemoryStore.open(db, clock)
+    try:
+        assert not any(row["op"] == "speak" for row in store.initiative_rows())
+    finally:
+        store.close()
+
+    db2 = tmp_path / "other.db"
+    _with_plan(db2, clock)
+    model = HeldInitiative()
+    model.initiatives = [{"speak": True, "line": "面试怎么样了"}]
+    err = StringIO()
+    session = DeskSession(
+        path=db2,
+        clock=clock,
+        letter=LETTER,
+        model=model,
+        settings=Settings(deepseek_api_key="test-key", dylan_db=str(db2)),
+        stderr=err,
+    )
+    try:
+        assert model.entered.wait(5)
+        session.set_composing(True)
+        model.release.set()
+        assert session.wait_opened(5)
+    finally:
+        model.release.set()
+        _stop(session, model)
+    store = MemoryStore.open(db2, clock)
+    try:
+        assert store.sessions() == []
+        assert not any(row["op"] == "speak" for row in store.initiative_rows())
+    finally:
+        store.close()
+
+
+def test_she_keeps_deciding_through_the_night(tmp_path: Path, clock) -> None:
+    db = tmp_path / "dylan.db"
+    _with_plan(db, clock)
+    clock.advance(hours=3.5)
+    model = FakeModel()
+    model.initiatives = [
+        {"speak": True, "line": "面试怎么样了"},
+        {"speak": True, "line": "后来怎么样"},
+        {"speak": True, "line": "还想再说一句"},
+    ]
+    session, model, _err, db = _open(tmp_path, clock, model)
+    found: list[dict[str, str]] = []
+    try:
+        _pull(session, found, lambda ev: any(item.get("text") == "面试怎么样了\n" for item in ev))
+        time.sleep(0.3)
+        assert len(model.calls("initiative")) == 1
+        clock.advance(hours=0.01)
+        time.sleep(0.4)
+        assert len(model.calls("initiative")) == 1
+        clock.advance(hours=0.2)
+        _pull(session, found, lambda ev: any(item.get("text") == "后来怎么样\n" for item in ev))
+        time.sleep(0.3)
+        clock.advance(hours=0.2)
+        _pull(session, found, lambda ev: any(item.get("text") == "还想再说一句\n" for item in ev))
+        assert len(model.calls("initiative")) == 3
+    finally:
+        _stop(session, model)
+
+
+def test_after_he_speaks_she_waits_out_a_new_gap(tmp_path: Path, clock) -> None:
+    db = tmp_path / "dylan.db"
+    _with_plan(db, clock)
+    model = FakeModel()
+    model.initiatives = [
+        {"speak": True, "line": "面试怎么样了"},
+        {"speak": True, "line": "后来怎么样"},
+    ]
+    session, model, _err, db = _open(tmp_path, clock, model)
+    found: list[dict[str, str]] = []
+    try:
+        _pull(session, found, lambda ev: any(item.get("text") == "面试怎么样了\n" for item in ev))
+        time.sleep(0.3)
+        assert len(model.calls("initiative")) == 1
+        session.send("还行")
+        _pull(session, found, lambda ev: sum(item["kind"] == "end" for item in ev) >= 2)
+        time.sleep(0.3)
+        clock.advance(hours=0.01)
+        time.sleep(0.4)
+        assert len(model.calls("initiative")) == 1
+        clock.advance(hours=0.2)
+        _pull(session, found, lambda ev: any(item.get("text") == "后来怎么样\n" for item in ev))
+        assert len(model.calls("initiative")) == 2
+    finally:
+        _stop(session, model)
+
+
+def test_typing_skips_a_check_and_his_line_still_arrives(tmp_path: Path, clock) -> None:
+    db = tmp_path / "dylan.db"
+    _with_plan(db, clock)
+    model = FakeModel()
+    model.reply = "在的"
+    model.initiatives = [
+        {"speak": False, "line": ""},
+        {"speak": True, "line": "后来怎么样"},
+    ]
+    session, model, _err, db = _open(tmp_path, clock, model)
+    found: list[dict[str, str]] = []
+    try:
+        assert session.wait_opened(5)
+        time.sleep(0.3)
+        assert len(model.calls("initiative")) == 1
+        session.set_composing(True)
+        clock.advance(hours=0.2)
+        time.sleep(0.5)
+        assert len(model.calls("initiative")) == 1
+        session.send("你好")
+        _pull(session, found, lambda ev: any("在的" in item.get("text", "") for item in ev))
+        time.sleep(0.3)
+        assert len(model.calls("initiative")) == 1
+        session.set_composing(False)
+        clock.advance(hours=0.2)
+        _pull(session, found, lambda ev: any(item.get("text") == "后来怎么样\n" for item in ev))
+        assert len(model.calls("initiative")) == 2
+    finally:
+        _stop(session, model)
+
+
+def test_a_new_window_is_told_he_has_not_answered(tmp_path: Path, clock) -> None:
+    db = tmp_path / "dylan.db"
+    _with_plan(db, clock)
+    model = FakeModel()
+    model.initiatives = [{"speak": True, "line": "面试怎么样了"}]
+    session, model, _err, db = _open(tmp_path, clock, model)
+    found: list[dict[str, str]] = []
+    try:
+        _pull(session, found, lambda ev: any(item.get("text") == "面试怎么样了\n" for item in ev))
+    finally:
+        _stop(session, model)
+    clock.advance(hours=2)
+    fresh = FakeModel()
+    fresh.initiatives = [{"speak": True, "line": "再问一次"}]
+    err = StringIO()
+    session = DeskSession(
+        path=db,
+        clock=clock,
+        letter=LETTER,
+        model=fresh,
+        settings=Settings(deepseek_api_key="test-key", dylan_show_mind=True),
+        stderr=err,
+    )
+    found = []
+    try:
+        _pull(session, found, lambda ev: any(item.get("text") == "再问一次\n" for item in ev))
+        assert "他还没接" in str(fresh.calls("initiative"))
+        assert "上一句他还没回" not in err.getvalue()
+        assert all(not item.get("text", "").startswith("〔") for item in found)
+    finally:
+        _stop(session, fresh)

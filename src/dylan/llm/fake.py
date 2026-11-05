@@ -11,11 +11,16 @@ _SENTENCE = re.compile(r"[^。！？\n]+")
 
 
 def request_kind(messages: list[dict[str, str]]) -> str:
-    system = messages[0].get("content", "") if messages else ""
-    if system.startswith("〔出生〕"):
-        return "birth"
-    if system.startswith("〔睡眠整理〕"):
-        return "sleep"
+    for message in messages:
+        content = message.get("content", "")
+        if content.startswith("〔出生〕"):
+            return "birth"
+        if content.startswith("〔睡眠整理〕"):
+            return "sleep"
+        if content.startswith("〔先开口〕"):
+            return "initiative"
+        if content.startswith("〔记下这一刻〕"):
+            return "note"
     return "note"
 
 
@@ -27,6 +32,7 @@ class FakeModel:
         self.births: list[object] = []
         self.notes: list[object] = []
         self.sleeps: list[object] = []
+        self.initiatives: list[object] = []
         self.fail: Exception | None = None
         self.partial: str | None = None
         self.json_fail = False
@@ -45,12 +51,19 @@ class FakeModel:
         self.json_seen.append((kind, messages))
         if self.json_fail:
             raise RuntimeError("json")
-        queue = {"birth": self.births, "note": self.notes, "sleep": self.sleeps}[kind]
+        queue = {
+            "birth": self.births,
+            "note": self.notes,
+            "sleep": self.sleeps,
+            "initiative": self.initiatives,
+        }[kind]
         if queue:
             item = queue.pop(0)
             if isinstance(item, Exception):
                 raise item
             return item  # type: ignore[return-value]
+        if kind == "initiative":
+            return {"speak": False, "reason": "", "line": ""}
         if kind == "birth":
             return self.default_birth(messages[-1].get("content", ""))
         if kind == "sleep":

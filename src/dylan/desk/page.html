@@ -187,11 +187,18 @@
     });
   }
 
+  function tellComposing() {
+    if (!window.pywebview || !window.pywebview.api || !window.pywebview.api.composing) return;
+    var text = box.value.replace(/^\s+|\s+$/g, "");
+    window.pywebview.api.composing(!!text);
+  }
+
   function submit() {
     if (leaving) return;
     var text = box.value.replace(/^\s+|\s+$/g, "");
     if (!text) return;
     box.value = "";
+    tellComposing();
     pending.push(text);
     pump();
   }
@@ -204,6 +211,8 @@
 
   window.addEventListener("dragover", function (event) { event.preventDefault(); });
   window.addEventListener("drop", function (event) { event.preventDefault(); });
+
+  box.addEventListener("input", tellComposing);
 
   box.addEventListener("keydown", function (event) {
     if (event.isComposing || event.keyCode === 229) return;
